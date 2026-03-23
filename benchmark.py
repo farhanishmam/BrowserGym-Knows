@@ -1,5 +1,6 @@
-from agentlab.agents.generic_agent import AGENT_4o_MINI 
+from agentlab.agents.generic_agent import AGENT_4o_MINI
 from agentlab.agents.generic_agent import AGENT_4o
+from agentlab.agents.generic_agent import AGENT_GPT54
 from agentlab.experiments.study import make_study
 from pathlib import Path
 from agentlab.experiments.study import Study
@@ -19,11 +20,11 @@ for env_args in benchmark.env_args_list:
 
 study = make_study(
     benchmark=benchmark,
-    agent_args=[AGENT_4o_MINI],
+    agent_args=[AGENT_GPT54],
     comment="Knows Benchmark with Google Auth",
 )
 
 study.dir = Path("results")
 
 # Run the study
-study.run(n_jobs=5)
+study.run(n_jobs=1)
