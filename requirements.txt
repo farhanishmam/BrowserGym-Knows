@@ -1,4 +1,3 @@
--e git+https://github.com/farhanishmam/AgentLab-Knows@0da2063cfecdaa806b3873007d38f69e3677fcb9#egg=agentlab&subdirectory=../../AgentLab-Knows
 aiofiles==24.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.0
@@ -16,9 +15,6 @@ beartype==0.12.0
 beautifulsoup4==4.14.2
 blinker==1.9.0
 Brotli==1.1.0
--e git+https://github.com/farhanishmam/BrowserGym-Knows@43a7dc9dfd905e8192c9a75ab7ee7ab1a695bad6#egg=browsergym_core&subdirectory=browsergym/core
--e git+https://github.com/farhanishmam/BrowserGym-Knows@43a7dc9dfd905e8192c9a75ab7ee7ab1a695bad6#egg=browsergym_experiments&subdirectory=browsergym/experiments
--e git+https://github.com/farhanishmam/BrowserGym-Knows@43a7dc9dfd905e8192c9a75ab7ee7ab1a695bad6#egg=browsergym_webarena&subdirectory=browsergym/webarena
 cachetools==6.2.1
 certifi==2025.10.5
 charset-normalizer==3.4.4
@@ -27,7 +23,7 @@ cloudpickle==3.1.1
 colorama==0.4.6
 colorful==0.5.7
 contexttimer==0.3.3
-contourpy==1.3.3
+contourpy==1.3.2
 cycler==0.12.1
 dask==2025.10.0
 dataclasses-json==0.6.7
@@ -82,7 +78,7 @@ huggingface-hub==0.35.3
 idna==3.11
 imageio==2.37.0
 importlib_metadata==8.7.0
-ipython==9.6.0
+ipython==8.38.0
 ipython_pygments_lexers==1.1.1
 itsdangerous==2.2.0
 jedi==0.19.2
@@ -113,7 +109,7 @@ msgpack==1.1.2
 multidict==6.7.0
 multiprocess==0.70.16
 mypy_extensions==1.1.0
-networkx==3.5
+networkx==3.4.2
 nltk==3.9.2
 numpy==2.2.6
 nvidia-cublas-cu12==12.8.4.1
@@ -241,8 +237,6 @@ uvicorn==0.37.0
 validators==0.35.0
 virtualenv==20.35.3
 wcwidth==0.2.14
-weblinx==0.3.2
-weblinx_browsergym==0.0.3
 websockets==15.0.1
 Werkzeug==3.1.3
 wrapt==2.0.0
