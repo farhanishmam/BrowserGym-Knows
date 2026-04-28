@@ -52,9 +52,15 @@ async ([parent_bid, bid_attr_name, tags_to_mark]) => {
     )
 
     let all_bids = new Set();
+    let warning_msgs = new Array();
 
     // get all DOM elements in the current frame (does not include elements in shadowDOMs)
     let elements = Array.from(document.querySelectorAll('*'));
+    const max_elements = 6000;
+    if (elements.length > max_elements) {
+        warning_msgs.push(`Frame marking: capped DOM marking at ${max_elements}/${elements.length} elements`);
+        elements = elements.slice(0, max_elements);
+    }
     let som_buttons = [];
     i = 0;
     while (i < elements.length) {
@@ -179,8 +185,6 @@ async ([parent_bid, bid_attr_name, tags_to_mark]) => {
             }
         }
     }
-
-    warning_msgs = new Array();
 
     // wait for all elements to be visited for visibility
     let visibility_marking_timeout = 1000;  // ms
