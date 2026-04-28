@@ -1,9 +1,15 @@
 import base64
 import io
 import logging
+import os
 import pkgutil
 import re
+import signal
+import threading
+import time
+from contextlib import contextmanager
 from typing import Literal
+from urllib.parse import urlparse
 
 import numpy as np
 import PIL.Image
@@ -19,8 +25,47 @@ MARK_FRAMES_MAX_TRIES = 3
 logger = logging.getLogger(__name__)
 
 
+def _debug_progress(message: str) -> None:
+    if os.environ.get("AGENTLAB_DEBUG_PROGRESS", "").strip():
+        print(f"[observation-progress] {message}", flush=True)
+
+
 class MarkingError(Exception):
     pass
+
+
+class FrameMarkingTimeout(Exception):
+    """Raised when a single frame's marking JS evaluation exceeds the per-frame timeout."""
+
+
+@contextmanager
+def _alarm_timeout(seconds: float):
+    """Best-effort wall-clock timeout using SIGALRM.
+
+    Only effective when called from the main thread on Unix; otherwise
+    it's a no-op and the caller must rely on softer global deadlines.
+    Raises ``FrameMarkingTimeout`` if the protected block runs longer
+    than ``seconds`` seconds.
+    """
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or not hasattr(signal, "setitimer")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield False
+        return
+
+    def _handler(signum, frame):  # noqa: ARG001
+        raise FrameMarkingTimeout(f"Frame marking exceeded {seconds:.1f}s timeout")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _pre_extract(
@@ -37,21 +82,129 @@ def _pre_extract(
 
     # we can't run this loop in JS due to Same-Origin Policy
     # (can't access the content of an iframe from a another one)
+    overall_timeout = float(
+        os.environ.get("BROWSERGYM_PRE_EXTRACT_TIMEOUT_SECONDS", "20")
+    )
+    deadline = time.monotonic() + overall_timeout
+    marked_frame_count = 0
+    max_marked_frames = int(os.environ.get("BROWSERGYM_PRE_EXTRACT_MAX_FRAMES", "20"))
+    # Per-frame timeout (seconds). Default: 8s. Only enforced via SIGALRM
+    # when running on the main thread of a Unix process; otherwise the
+    # caller relies on the global ``deadline`` above.
+    per_frame_timeout = float(
+        os.environ.get("BROWSERGYM_PRE_EXTRACT_PER_FRAME_TIMEOUT_SECONDS", "8")
+    )
+
+    # Workspace hosts are first-party iframes we always mark even when the
+    # opt-in cross-origin / non-workspace skip flags are enabled.
+    workspace_hosts = (
+        "docs.google.com",
+        "drive.google.com",
+        "sheets.google.com",
+        "slides.google.com",
+        "googleusercontent.com",
+        "google.com",
+    )
+
+    def _host(url: str) -> str:
+        try:
+            return (urlparse(url).hostname or "").lower()
+        except Exception:
+            return ""
+
+    main_url = page.main_frame.url or ""
+    main_host = _host(main_url)
+    is_workspace_main = any(
+        main_host == h or main_host.endswith("." + h) for h in workspace_hosts
+    )
+
+    # Optional opt-in fallbacks (default OFF). The per-frame timeout below
+    # is enough on its own for most pages; these flags only exist for
+    # users that need extra protection on extremely ad-heavy sites.
+    skip_cross_origin = (
+        not is_workspace_main
+        and os.environ.get("BROWSERGYM_PRE_EXTRACT_SKIP_CROSS_ORIGIN", "0").lower()
+        in ("1", "true", "yes")
+    )
+    skip_all_children = (
+        not is_workspace_main
+        and os.environ.get(
+            "BROWSERGYM_PRE_EXTRACT_NON_WORKSPACE_NO_CHILDREN", "0"
+        ).lower()
+        in ("1", "true", "yes")
+    )
+
+    # Once a frame on this page has timed out, don't try to mark any more
+    # children -- a hung renderer often pins subsequent calls too.
+    state = {"tainted": False}
+
     def mark_frames_recursive(frame, frame_bid: str):
+        nonlocal marked_frame_count
+        if state["tainted"]:
+            return
+        if time.monotonic() >= deadline:
+            logger.warning("Skipping remaining frame marking after pre-extract deadline.")
+            return
+        if marked_frame_count >= max_marked_frames:
+            logger.warning("Skipping remaining frame marking after %s frames.", max_marked_frames)
+            return
+        marked_frame_count += 1
+        _debug_progress(f"_pre_extract: marking frame {frame_bid or 'main'}")
         assert frame_bid == "" or re.match(r"^[a-z][a-zA-Z]*$", frame_bid)
         logger.debug(f"Marking frame {repr(frame_bid)}")
 
-        # mark all DOM elements in the frame (it will use the parent frame element's bid as a prefix)
-        warning_msgs = frame.evaluate(
-            js_frame_mark_elements,
-            [frame_bid, BID_ATTR, tags_to_mark],
-        )
+        # mark all DOM elements in the frame, guarded by a per-frame
+        # wall-clock timeout. If the frame's renderer is hung (e.g. an ad
+        # iframe), SIGALRM aborts the synchronous evaluate() call, we log
+        # a warning and skip the rest of this page's frames to avoid
+        # cascading hangs through the same poisoned dispatcher.
+        try:
+            with _alarm_timeout(per_frame_timeout):
+                warning_msgs = frame.evaluate(
+                    js_frame_mark_elements,
+                    [frame_bid, BID_ATTR, tags_to_mark],
+                )
+        except FrameMarkingTimeout:
+            logger.warning(
+                "Frame '%s' marking timed out after %.1fs; skipping remaining frames on this page.",
+                frame_bid or "main",
+                per_frame_timeout,
+            )
+            _debug_progress(
+                f"_pre_extract: timed out marking frame {frame_bid or 'main'}"
+            )
+            state["tainted"] = True
+            return
+        except playwright.sync_api.Error as exc:
+            msg = str(exc)
+            if any(s in msg for s in ("Frame was detached", "Frame has been detached")):
+                logger.warning(
+                    "Frame '%s' was detached during marking; skipping.", frame_bid or "main"
+                )
+                return
+            raise
         # print warning messages if any
-        for msg in warning_msgs:
-            logger.warning(msg)
+        for warn in warning_msgs or []:
+            logger.warning(warn)
+
+        # Optional hard skip of child frames on non-workspace pages.
+        if skip_all_children and frame == page.main_frame:
+            children = list(frame.child_frames)
+            if children:
+                logger.warning(
+                    "Skipping %s child iframe(s) on non-workspace page (%s).",
+                    len(children),
+                    main_host or "?",
+                )
+                _debug_progress(
+                    f"_pre_extract: skipping {len(children)} child frames on non-workspace page"
+                )
+            return
 
         # recursively mark all descendant frames
         for child_frame in frame.child_frames:
+            if state["tainted"]:
+                return
             # deal with detached frames
             if child_frame.is_detached():
                 continue
@@ -66,6 +219,25 @@ def _pre_extract(
             sandbox_attr = child_frame_elem.get_attribute("sandbox")
             if sandbox_attr is not None and "allow-scripts" not in sandbox_attr.split():
                 continue
+            # Optional cross-origin skip on non-workspace pages.
+            if skip_cross_origin:
+                child_url = child_frame.url or ""
+                child_host = _host(child_url)
+                if (
+                    child_host
+                    and child_host != main_host
+                    and not child_host.endswith("." + main_host)
+                    and not main_host.endswith("." + child_host)
+                ):
+                    logger.warning(
+                        "Skipping cross-origin child iframe (%s) on third-party page (%s).",
+                        child_host,
+                        main_host,
+                    )
+                    _debug_progress(
+                        f"_pre_extract: skipping cross-origin child frame {child_host}"
+                    )
+                    continue
             child_frame_bid = child_frame_elem.get_attribute(BID_ATTR)
             if child_frame_bid is None:
                 if lenient:
@@ -84,9 +256,23 @@ def _post_extract(page: playwright.sync_api.Page):
         __name__, "javascript/frame_unmark_elements.js"
     ).decode("utf-8")
 
+    # Per-frame timeout for unmarking. Same SIGALRM-based mechanism as
+    # _pre_extract: protects against ad-iframe hangs in the synchronous
+    # frame.evaluate() call.
+    per_frame_timeout = float(
+        os.environ.get("BROWSERGYM_PRE_EXTRACT_PER_FRAME_TIMEOUT_SECONDS", "8")
+    )
+    overall_timeout = float(
+        os.environ.get("BROWSERGYM_PRE_EXTRACT_TIMEOUT_SECONDS", "20")
+    )
+    deadline = time.monotonic() + overall_timeout
+    tainted = False
+
     # we can't run this loop in JS due to Same-Origin Policy
     # (can't access the content of an iframe from a another one)
     for frame in page.frames:
+        if tainted or time.monotonic() >= deadline:
+            break
         try:
             if not frame == page.main_frame:
                 # deal with weird frames (pdf viewer in <embed>)
@@ -104,7 +290,16 @@ def _post_extract(page: playwright.sync_api.Page):
                 if bid is None:
                     continue
 
-            frame.evaluate(js_frame_unmark_elements)
+            try:
+                with _alarm_timeout(per_frame_timeout):
+                    frame.evaluate(js_frame_unmark_elements)
+            except FrameMarkingTimeout:
+                logger.warning(
+                    "Frame unmarking timed out after %.1fs; skipping remaining frames.",
+                    per_frame_timeout,
+                )
+                tainted = True
+                continue
         except playwright.sync_api.Error as e:
             if any(msg in str(e) for msg in ("Frame was detached", "Frame has been detached")):
                 pass

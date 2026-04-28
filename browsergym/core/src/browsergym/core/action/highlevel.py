@@ -276,7 +276,7 @@ ACTION_SUBSETS = {
         scroll,
         # scroll_at,
         select_option,
-        # send_msg_to_user,
+        send_msg_to_user,
         tab_close,
         tab_focus,
         upload_file,

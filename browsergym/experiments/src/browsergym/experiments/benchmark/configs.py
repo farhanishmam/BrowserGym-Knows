@@ -96,6 +96,8 @@ DEFAULT_HIGHLEVEL_ACTION_SET_ARGS = {
 }
 
 # all benchmarks are callables designed for lazy loading, i.e. `bench = DEFAULT_BENCHMARKS["miniwob_all"]()`
+KNOWS_MAX_STEPS = 100
+
 DEFAULT_BENCHMARKS = {
     "miniwob": lambda n_repeats=5: Benchmark(
         name="miniwob",
@@ -281,6 +283,9 @@ DEFAULT_BENCHMARKS = {
         ),
         task_metadata=task_metadata("weblinx"),
     ),
+    # max_steps capped at KNOWS_MAX_STEPS: agents that exceed it hit a gym TimeLimit
+    # truncation. KNOWS tasks expose a finalize() hook so benchmark runners can
+    # decide whether to grade the final document state after the episode ends.
     "knows_1": lambda n_repeats=1: Benchmark(
         name="knows",
         high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
@@ -289,10 +294,108 @@ DEFAULT_BENCHMARKS = {
         backends=["knows"],
         env_args_list=make_env_args_list_from_repeat_tasks(
             task_list=task_list_from_metadata(metadata=task_metadata("knows")),
-            max_steps=100,
+            max_steps=KNOWS_MAX_STEPS,
             n_repeats=n_repeats,
             seeds_rng=np.random.RandomState(42),
         ),
         task_metadata=task_metadata("knows"),
+    ),
+    "knows_docs_1": lambda n_repeats=1: Benchmark(
+        name="knows_docs_1",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_docs_1")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_docs_1"),
+    ),
+    "knows_sheets_2": lambda n_repeats=1: Benchmark(
+        name="knows_sheets_2",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_sheets_2")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_sheets_2"),
+    ),
+    "knows_docs_5": lambda n_repeats=1: Benchmark(
+        name="knows_docs_5",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_docs_5")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_docs_5"),
+    ),
+    "knows_sheets_6": lambda n_repeats=1: Benchmark(
+        name="knows_sheets_6",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_sheets_6")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_sheets_6"),
+    ),
+    "knows_slides_20": lambda n_repeats=1: Benchmark(
+        name="knows_slides_20",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_slides_20")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_slides_20"),
+    ),
+    "knows_slides_17": lambda n_repeats=1: Benchmark(
+        name="knows_slides_17",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_slides_17")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_slides_17"),
+    ),
+    "knows_sheets_38": lambda n_repeats=1: Benchmark(
+        name="knows_sheets_38",
+        high_level_action_set_args=DEFAULT_HIGHLEVEL_ACTION_SET_ARGS["knows"],
+        is_multi_tab=True,
+        supports_parallel_seeds=True,
+        backends=["knows"],
+        env_args_list=make_env_args_list_from_repeat_tasks(
+            task_list=task_list_from_metadata(metadata=task_metadata("knows_sheets_38")),
+            max_steps=KNOWS_MAX_STEPS,
+            n_repeats=n_repeats,
+            seeds_rng=np.random.RandomState(42),
+        ),
+        task_metadata=task_metadata("knows_sheets_38"),
     ),
 }

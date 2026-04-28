@@ -512,7 +512,32 @@ def goto(url: str):
     Examples:
         goto('http://www.example.com')
     """
-    page.goto(url)
+    # Strategy:
+    #   1. First try Playwright's page.goto() with wait_until='commit' so we
+    #      only wait for the navigation to be committed (URL changed), not
+    #      for any document/load event that heavy WordPress + Cloudflare
+    #      pages (e.g. minimalistbaker.com) sometimes never fire. A short
+    #      explicit timeout is required because set_default_timeout does
+    #      not reliably apply to navigation in headless Chromium.
+    #   2. If that still raises (bot challenge, beforeunload confirm, dead
+    #      socket, etc.), fall back to a pure-JS navigation via
+    #      page.evaluate() which cannot hang on Playwright's wait machinery.
+    #   3. Either way, swallow any timeout error and let the next
+    #      observation extractor work with whatever the page has loaded.
+    import playwright.sync_api as _pw_sync_api
+
+    try:
+        page.goto(url, wait_until="commit", timeout=15000)
+        return
+    except _pw_sync_api.TimeoutError:
+        pass
+    except _pw_sync_api.Error:
+        pass
+
+    try:
+        page.evaluate("(u) => { window.location.href = u; }", url)
+    except _pw_sync_api.Error:
+        pass
 
 
 # https://playwright.dev/python/docs/api/class-page#page-go-back

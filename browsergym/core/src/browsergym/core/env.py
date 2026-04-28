@@ -1,6 +1,8 @@
 import copy
 import logging
+import os
 import re
+import shutil
 import time
 from abc import ABC
 from pathlib import Path
@@ -31,6 +33,11 @@ from .task import AbstractBrowserTask
 logger = logging.getLogger(__name__)
 
 
+def _debug_progress(message: str) -> None:
+    if os.environ.get("AGENTLAB_DEBUG_PROGRESS", "").strip():
+        print(f"[browsergym-progress] {message}", flush=True)
+
+
 def _try_to_extract_legacy_goal(goal: list):
     legacy_goal_strings = []
     for message in goal:
@@ -47,6 +54,122 @@ def _try_to_extract_legacy_goal(goal: list):
     legacy_goal = "\n".join(legacy_goal_strings)
 
     return legacy_goal
+
+
+_PROFILE_CLONE_CACHE: dict[str, str] = {}
+
+
+def _mint_per_worker_storage_state() -> Optional[str]:
+    """Return a path to a freshly-minted Google storage_state for this PID.
+
+    Driven by ``BROWSERGYM_AUTO_LOGIN=1``. Loads the helper from either
+    :mod:`scripts.storage_state_pool` (preferred -- requires the repo root
+    on ``PYTHONPATH``, which ``benchmarks/_common.py`` and ``benchmark.py``
+    already arrange) or by falling back to a path-based dynamic import via
+    ``BROWSERGYM_STATE_POOL_HELPER``. Returns ``None`` if the helper is
+    unavailable, the auto-login subprocess fails, or
+    ``GOOGLE_USER_EMAIL`` / ``GOOGLE_USER_PASSWORD`` are unset; callers
+    fall back to the legacy persistent-profile / storage_state.json path
+    when this returns ``None``.
+    """
+    mint_fn = None
+
+    try:
+        from scripts.storage_state_pool import mint_for_current_pid  # type: ignore
+
+        mint_fn = mint_for_current_pid
+    except Exception as exc:  # noqa: BLE001 -- many failure modes
+        helper_path = os.environ.get("BROWSERGYM_STATE_POOL_HELPER", "")
+        if helper_path and Path(helper_path).is_file():
+            try:
+                import importlib.util
+
+                spec = importlib.util.spec_from_file_location(
+                    "browsergym_state_pool_helper", helper_path
+                )
+                if spec is not None and spec.loader is not None:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)  # type: ignore[attr-defined]
+                    mint_fn = getattr(module, "mint_for_current_pid", None)
+            except Exception as inner_exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not load storage_state_pool helper from %s: %s",
+                    helper_path,
+                    inner_exc,
+                )
+        if mint_fn is None:
+            logger.warning(
+                "BROWSERGYM_AUTO_LOGIN=1 but storage_state_pool is not "
+                "importable (%s). Falling back to legacy auth path.",
+                exc,
+            )
+            return None
+
+    try:
+        path = mint_fn()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-login mint raised: %s. Falling back.", exc)
+        return None
+
+    if path is None:
+        return None
+    return str(path)
+
+
+def _clone_persistent_profile(source_profile: str) -> str:
+    """Return a per-process clone of ``source_profile``.
+
+    Each Ray worker (each PID) gets its own copy of the user-data-dir so that
+    multiple Chromium processes can run in parallel without colliding on
+    Chrome's per-profile SingletonLock. The clone is made once per worker and
+    reused across tasks scheduled to the same worker, so session cookies
+    accumulate naturally across tasks (matching single-worker behavior).
+
+    Singleton* symlinks from the source are skipped because they may dangle to
+    sockets owned by another Chrome process, which would otherwise make
+    ``shutil.copytree`` raise.
+    """
+    cached = _PROFILE_CLONE_CACHE.get(source_profile)
+    if cached and Path(cached).is_dir():
+        return cached
+
+    pool_root = Path(
+        os.environ.get(
+            "BROWSERGYM_PERSISTENT_POOL_DIR",
+            str(Path(source_profile).parent / ".bg_profile_pool"),
+        )
+    )
+    pool_root.mkdir(parents=True, exist_ok=True)
+
+    clone_dir = pool_root / f"worker_{os.getpid()}"
+    if not clone_dir.exists():
+        def _ignore_singletons(_src, names):
+            return [n for n in names if n.startswith("Singleton")]
+
+        logger.info(
+            "Cloning persistent profile %s -> %s for parallel worker.",
+            source_profile,
+            clone_dir,
+        )
+        shutil.copytree(
+            source_profile,
+            clone_dir,
+            symlinks=True,
+            ignore=_ignore_singletons,
+        )
+    else:
+        # Stale Singleton* from a previous Chromium under this PID would block
+        # re-launch. Defensive cleanup; usually a no-op.
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            entry = clone_dir / name
+            try:
+                if entry.is_symlink() or entry.exists():
+                    entry.unlink()
+            except OSError:
+                pass
+
+    _PROFILE_CLONE_CACHE[source_profile] = str(clone_dir)
+    return str(clone_dir)
 
 
 class BrowserEnv(gym.Env, ABC):
@@ -226,9 +349,15 @@ class BrowserEnv(gym.Env, ABC):
 
         if self.task:
             self.task.teardown()
-            self.context.close()
-            self.chat.close()
-            self.browser.close()
+            if self.context:
+                self.context.close()
+                self.context = None
+            if self.chat:
+                self.chat.close()
+                self.chat = None
+            if self.browser:
+                self.browser.close()
+                self.browser = None
 
         # create a new task
         self.task = self.task_entrypoint(seed=seed, **self.task_kwargs)
@@ -267,31 +396,147 @@ class BrowserEnv(gym.Env, ABC):
         ]
         args = [arg for arg in args if arg is not None]  # Remove None values
 
-        # create a new browser
-        self.browser = pw.chromium.launch(
-            headless=self.headless,
-            slow_mo=slow_mo,
-            args=args,
-            ignore_default_args=[
-                "--hide-scrollbars"
-            ],  # otherwise the screenshot doesn't see the scrollbars
-            # will raise an Exception if above args are overriden
-            **self.pw_chromium_kwargs,
-        )
+        # Auth path #1 (preferred for parallel runs): per-worker storage_state
+        # minted on demand by the stealth Playwright login flow in
+        # ``scripts/google_auto_login.py``. Triggered by
+        # ``BROWSERGYM_AUTO_LOGIN=1`` (typically set via ``run.sh`` /
+        # ``benchmarks/_common.py`` when ``BROWSERGYM_AUTH_MODE=auto_login``).
+        # Each PID gets its own freshly-validated Google session, which
+        # sidesteps the cookie-rotation-collision problem that plagues
+        # cloned persistent profiles when 5 workers run in parallel. If
+        # minting fails (creds missing, 2FA challenge fired, etc.) we fall
+        # through to the legacy auth paths below so a flaky login doesn't
+        # abort the whole run.
+        auto_login_state: Optional[str] = None
+        if os.environ.get("BROWSERGYM_AUTO_LOGIN", "").lower() in ("1", "true", "yes"):
+            auto_login_state = _mint_per_worker_storage_state()
+            if auto_login_state:
+                # Inject the freshly-minted snapshot into the stateless
+                # ``browser.new_context()`` branch below. The persistent-
+                # profile branch is intentionally bypassed when auto-login
+                # succeeds; per-worker minted snapshots already give us the
+                # parallelism guarantees the persistent-profile clone pool
+                # was working around.
+                self.pw_context_kwargs = dict(self.pw_context_kwargs)
+                self.pw_context_kwargs["storage_state"] = auto_login_state
+                logger.info(
+                    "Auto-login mint succeeded for pid=%d; storage_state=%s",
+                    os.getpid(),
+                    auto_login_state,
+                )
+            else:
+                fallback_state = self.pw_context_kwargs.get("storage_state")
+                if fallback_state:
+                    logger.warning(
+                        "Auto-login mint FAILED for pid=%d; falling back to "
+                        "legacy storage_state=%s. Task auth may be stale -- "
+                        "check .bg_storage_state_pool/debug/<pid>/ for the "
+                        "screenshot + HTML captured at failure.",
+                        os.getpid(),
+                        fallback_state,
+                    )
+                else:
+                    logger.error(
+                        "Auto-login mint FAILED for pid=%d AND no fallback "
+                        "storage_state is configured. The Chromium that's "
+                        "about to launch has no Google auth -- expect tasks "
+                        "to time out on the sign-in page. Check "
+                        ".bg_storage_state_pool/debug/<pid>/ for the "
+                        "screenshot + HTML captured at failure.",
+                        os.getpid(),
+                    )
 
-        # create a new browser context for pages
-        self.context = self.browser.new_context(
-            no_viewport=True if self.resizeable_window else None,
-            viewport=viewport if not self.resizeable_window else None,
-            record_video_dir=(
-                Path(self.record_video_dir) / "task_video" if self.record_video_dir else None
-            ),
-            record_video_size=viewport,
-            locale=locale,
-            timezone_id=timezone_id,
-            # will raise an Exception if above args are overriden
-            **self.pw_context_kwargs,
-        )
+        # Auth path #2 (legacy fallback): launch a persistent Chromium profile
+        # instead of a stateless browser+context pair. Triggered by setting
+        # BROWSERGYM_PERSISTENT_PROFILE to a user-data-dir path (e.g. an
+        # existing Playwright profile that's already signed into Google). This
+        # lets session-rotation cookies refresh themselves the way real Chrome
+        # does, which used to be the most reliable way to keep the agent
+        # signed in -- now superseded by the auto-login mint above for
+        # parallel runs, but kept as a fallback for single-worker debugging.
+        #
+        # Single-worker mode: a profile dir can only be opened by one Chromium
+        # process at a time. Set n_jobs=1 unless you opt into parallel mode.
+        # Parallel mode: setting BROWSERGYM_PERSISTENT_PARALLEL=1 makes each
+        # worker process clone the source profile to a per-PID directory under
+        # BROWSERGYM_PERSISTENT_POOL_DIR (default: <profile>/../.bg_profile_pool).
+        # The clone reuses the original Google session at startup and then
+        # evolves its own rotation cookies independently. Cleanup of dead-PID
+        # clones is handled by the driver (see benchmark.py).
+        persistent_profile = os.environ.get("BROWSERGYM_PERSISTENT_PROFILE")
+        # Only honor the persistent profile path when auto-login did not run
+        # successfully -- otherwise we'd double-up on auth and the
+        # persistent-profile branch would also strip the storage_state we
+        # just injected.
+        if auto_login_state:
+            persistent_profile = None
+
+        if persistent_profile and os.environ.get("BROWSERGYM_PERSISTENT_PARALLEL", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            persistent_profile = _clone_persistent_profile(persistent_profile)
+
+        if persistent_profile:
+            persistent_channel = os.environ.get("BROWSERGYM_PERSISTENT_CHANNEL", "chrome")
+            extra_persistent_args = [
+                a
+                for a in (
+                    "--profile-directory=Default",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                )
+                if a not in args
+            ]
+            # storage_state is redundant (and rejected) when a user-data-dir is supplied.
+            persistent_context_kwargs = dict(self.pw_context_kwargs)
+            persistent_context_kwargs.pop("storage_state", None)
+
+            self.browser = None
+            self.context = pw.chromium.launch_persistent_context(
+                user_data_dir=persistent_profile,
+                channel=persistent_channel,
+                headless=self.headless,
+                slow_mo=slow_mo,
+                args=args + extra_persistent_args,
+                ignore_default_args=["--hide-scrollbars"],
+                no_viewport=True if self.resizeable_window else None,
+                viewport=viewport if not self.resizeable_window else None,
+                record_video_dir=(
+                    Path(self.record_video_dir) / "task_video" if self.record_video_dir else None
+                ),
+                record_video_size=viewport,
+                locale=locale,
+                timezone_id=timezone_id,
+                **persistent_context_kwargs,
+            )
+        else:
+            # create a new browser
+            self.browser = pw.chromium.launch(
+                headless=self.headless,
+                slow_mo=slow_mo,
+                args=args,
+                ignore_default_args=[
+                    "--hide-scrollbars"
+                ],  # otherwise the screenshot doesn't see the scrollbars
+                # will raise an Exception if above args are overriden
+                **self.pw_chromium_kwargs,
+            )
+
+            # create a new browser context for pages
+            self.context = self.browser.new_context(
+                no_viewport=True if self.resizeable_window else None,
+                viewport=viewport if not self.resizeable_window else None,
+                record_video_dir=(
+                    Path(self.record_video_dir) / "task_video" if self.record_video_dir else None
+                ),
+                record_video_size=viewport,
+                locale=locale,
+                timezone_id=timezone_id,
+                # will raise an Exception if above args are overriden
+                **self.pw_context_kwargs,
+            )
 
         # set default timeout
         self.context.set_default_timeout(timeout)
@@ -481,16 +726,20 @@ document.addEventListener("visibilitychange", () => {
             info: additional information about the step
         """
         logger.debug("Action executed")
+        _debug_progress("post_step: action executed")
         info["action_exec_stop"] = time.time()
 
         info["wait_for_page_loading_start"] = time.time()
         # wait a bit (for the JavaScript callback to set the active page)
         logger.debug(f"Waiting {self.pre_observation_delay} seconds before extracting observation")
+        _debug_progress("post_step: pre-observation delay")
         time.sleep(self.pre_observation_delay)  # wait for JS events to be fired
         self.context.cookies()  # trigger all waiting Playwright callbacks on the stack (hack, see https://playwright.dev/java/docs/multithreading)
 
         # wait for the network to idle before extracting the observation, reward etc.
+        _debug_progress("post_step: waiting dom loaded")
         self._wait_dom_loaded()
+        _debug_progress("post_step: dom loaded wait complete")
 
         info["wait_for_page_loading_stop"] = time.time()
 
@@ -499,6 +748,7 @@ document.addEventListener("visibilitychange", () => {
         if validate:
             # after the action is executed, the active page might have changed
             # perform a safety check
+            _debug_progress("post_step: active page check")
             self._active_page_check()
             logger.debug("Active page checked")
 
@@ -508,9 +758,11 @@ document.addEventListener("visibilitychange", () => {
 
             logger.debug("Initiating task validation")
             # extract reward, done, user_message, info (task-specific)
+            _debug_progress("post_step: task validate")
             reward, done, user_message, task_info = self._task_validate()
             info["task_info"] = task_info
             logger.debug("Task validation done")
+            _debug_progress("post_step: task validate complete")
         else:
             reward = 0
             done = False
@@ -526,9 +778,11 @@ document.addEventListener("visibilitychange", () => {
             self.chat.add_message(role="user", msg=user_message)
 
         # extract observation (generic)
+        _debug_progress("post_step: get observation")
         obs = self._get_obs()
         info["get_observation_stop"] = time.time()
         logger.debug("Observation extracted")
+        _debug_progress("post_step: observation extracted")
 
         # new step API wants a 5-tuple (gymnasium)
         terminated = done or (
@@ -561,14 +815,23 @@ document.addEventListener("visibilitychange", () => {
             self.chat.wait_for_user_message()
 
     def _wait_dom_loaded(self):
+        deadline = time.monotonic() + float(
+            os.environ.get("BROWSERGYM_DOM_LOADED_TIMEOUT_SECONDS", "10")
+        )
         for page in self.context.pages:
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            if remaining_ms <= 1:
+                return
             try:
-                page.wait_for_load_state("domcontentloaded", timeout=3000)
+                page.wait_for_load_state("domcontentloaded", timeout=min(3000, remaining_ms))
             except playwright.sync_api.Error:
                 pass
             for frame in page.frames:
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                if remaining_ms <= 1:
+                    return
                 try:
-                    frame.wait_for_load_state("domcontentloaded", timeout=3000)
+                    frame.wait_for_load_state("domcontentloaded", timeout=min(1000, remaining_ms))
                 except playwright.sync_api.Error:
                     pass
 
@@ -634,12 +897,17 @@ document.addEventListener("visibilitychange", () => {
         for retries_left in reversed(range(EXTRACT_OBS_MAX_TRIES)):
             try:
                 # pre-extraction, mark dom elements (set bid, set dynamic attributes like value and checked)
+                _debug_progress("_get_obs: pre-extract")
                 _pre_extract(self.page, tags_to_mark=self.tags_to_mark, lenient=(retries_left == 0))
 
+                _debug_progress("_get_obs: DOM snapshot")
                 dom = extract_dom_snapshot(self.page)
+                _debug_progress("_get_obs: accessibility tree")
                 axtree = extract_merged_axtree(self.page)
+                _debug_progress("_get_obs: focused element")
                 focused_element_bid = extract_focused_element_bid(self.page)
                 scale_factor = getattr(self.page, "_bgym_scale_factor", 1.0)
+                _debug_progress("_get_obs: extra DOM properties")
                 extra_properties = extract_dom_extra_properties(dom, scale_factor=scale_factor)
             except (playwright.sync_api.Error, MarkingError) as e:
                 err_msg = str(e)
@@ -664,9 +932,11 @@ document.addEventListener("visibilitychange", () => {
             break
 
         # post-extraction cleanup of temporary info in dom
+        _debug_progress("_get_obs: post-extract cleanup")
         _post_extract(self.page)
 
         # obs is generic to all tasks
+        _debug_progress("_get_obs: assemble observation")
         obs = {
             "chat_messages": tuple(copy.deepcopy(self.chat.messages)),
             "goal": _try_to_extract_legacy_goal(self.goal_object),  # legacy goal, deprecated
