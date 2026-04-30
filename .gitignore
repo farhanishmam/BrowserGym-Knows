@@ -4,7 +4,7 @@ playwright_chrome_profile
 .DS_store
 .idea/
 docs/src/generated/
-
+service-account.json
 # Google auth — never commit credentials
 **/auth-data/service-account.json
 **/auth-data/token.json
