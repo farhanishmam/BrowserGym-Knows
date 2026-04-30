@@ -50,18 +50,16 @@ The new auth path has three pieces:
    instead of all racing each other.
 
 3. [`browsergym/core/src/browsergym/core/env.py`](browsergym/core/src/browsergym/core/env.py) —
-   the `BrowserEnv.reset()` method now picks an auth path in this order:
+   the `BrowserEnv.reset()` method has a single auth path: it calls
+   `_mint_per_worker_storage_state()` and injects the resulting per-PID
+   file into `browser.new_context(storage_state=...)`. If minting fails
+   for any reason (helper missing, credentials missing, 2FA challenge,
+   etc.) it raises a `RuntimeError` immediately rather than falling back
+   to a shared snapshot — two workers must never share a storage_state.
 
-   - If `BROWSERGYM_AUTO_LOGIN=1`, mint a per-worker snapshot and inject
-     it into `browser.new_context(storage_state=...)`.
-   - Else if `BROWSERGYM_PERSISTENT_PROFILE` is set, reuse (or clone) an
-     on-disk Chromium user-data-dir (legacy path).
-   - Else fall back to the static `storage_state.json` snapshot at the
-     repo root (last-resort path).
-
-`run.sh` and `benchmarks/_common.py` flip on `BROWSERGYM_AUTO_LOGIN=1`
-automatically when `BROWSERGYM_AUTH_MODE=auto_login` (the default) and
-the `GOOGLE_USER_*` env vars are present.
+`run.sh`, `benchmark.py`, and `benchmarks/_common.py` set
+`BROWSERGYM_AUTO_LOGIN=1` unconditionally. `BROWSERGYM_AUTH_MODE`
+defaults to `auto_login`; setting it to anything else is a hard error.
 
 ## First-run device trust
 
@@ -88,9 +86,9 @@ All knobs are env vars; defaults are in parentheses.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `BROWSERGYM_AUTH_MODE` | `auto_login` | `auto_login` (mint per worker) or `persistent_profile` (reuse on-disk Chromium dir). |
-| `GOOGLE_USER_EMAIL` | _(required for auto-login)_ | Account that the auto-login flow signs in as. |
-| `GOOGLE_USER_PASSWORD` | _(required for auto-login)_ | Password for that account. |
+| `BROWSERGYM_AUTH_MODE` | `auto_login` | The only supported value. Any other setting is rejected. |
+| `GOOGLE_USER_EMAIL` | _(required)_ | Account that the auto-login flow signs in as. |
+| `GOOGLE_USER_PASSWORD` | _(required)_ | Password for that account. |
 | `BROWSERGYM_STATE_POOL_DIR` | `<repo>/.bg_storage_state_pool` | Where per-PID `worker_<pid>.json` snapshots live. |
 | `BROWSERGYM_STATE_POOL_TTL` | `1500` (25 min) | How fresh a snapshot must be (seconds) before re-minting on a worker's next call. |
 | `BROWSERGYM_N_JOBS` | `5` | Parallel Ray worker count. Per-worker minting means there is no parallelism cap from the auth path. |
@@ -115,11 +113,15 @@ short window). Re-running the benchmark will mint a fresh snapshot for
 each worker and recover automatically. If the problem persists, do the
 headed bootstrap once on the same machine that runs the benchmark.
 
-### I want to use the old persistent-profile path
+### Why was the persistent-profile / shared-snapshot path removed?
 
-Set `BROWSERGYM_AUTH_MODE=persistent_profile` (and make sure
-`playwright_chrome_profile/` exists). `run.sh` will skip the auto-login
-wiring and fall back to the cloned-profile-pool behavior.
+Per-worker isolation is a hard requirement: two Ray workers must never
+operate against the same Google session. The legacy `snapshot` mode had
+every worker read the same `storage_state.json`, and
+`persistent_profile` shared a single source profile (with per-PID
+clones racing each other on cookie rotation). Both modes have been
+removed; `auto_login` (per-PID `worker_<pid>.json`) is the only
+supported path.
 
 ## Files
 

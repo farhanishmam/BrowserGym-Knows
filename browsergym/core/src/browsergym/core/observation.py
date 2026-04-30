@@ -208,15 +208,25 @@ def _pre_extract(
             # deal with detached frames
             if child_frame.is_detached():
                 continue
-            # deal with weird frames (pdf viewer in <embed>)
-            child_frame_elem = child_frame.frame_element()
-            if not child_frame_elem.content_frame() == child_frame:
+            try:
+                # deal with weird frames (pdf viewer in <embed>)
+                child_frame_elem = child_frame.frame_element()
+                if not child_frame_elem.content_frame() == child_frame:
+                    logger.warning(
+                        f"Skipping frame '{child_frame.name}' for marking, seems problematic."
+                    )
+                    continue
+                # deal with sandboxed frames with blocked script execution
+                sandbox_attr = child_frame_elem.get_attribute("sandbox")
+            except playwright.sync_api.Error as exc:
+                if child_frame.is_detached():
+                    continue
                 logger.warning(
-                    f"Skipping frame '{child_frame.name}' for marking, seems problematic."
+                    "Skipping frame '%s' for marking after frame element lookup failed: %s",
+                    child_frame.name,
+                    exc,
                 )
                 continue
-            # deal with sandboxed frames with blocked script execution
-            sandbox_attr = child_frame_elem.get_attribute("sandbox")
             if sandbox_attr is not None and "allow-scripts" not in sandbox_attr.split():
                 continue
             # Optional cross-origin skip on non-workspace pages.
@@ -238,7 +248,17 @@ def _pre_extract(
                         f"_pre_extract: skipping cross-origin child frame {child_host}"
                     )
                     continue
-            child_frame_bid = child_frame_elem.get_attribute(BID_ATTR)
+            try:
+                child_frame_bid = child_frame_elem.get_attribute(BID_ATTR)
+            except playwright.sync_api.Error as exc:
+                if child_frame.is_detached():
+                    continue
+                logger.warning(
+                    "Skipping frame '%s' for marking after bid lookup failed: %s",
+                    child_frame.name,
+                    exc,
+                )
+                continue
             if child_frame_bid is None:
                 if lenient:
                     logger.warning("Cannot mark a child frame without a bid. Skipping frame.")
