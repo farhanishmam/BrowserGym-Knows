@@ -2,7 +2,6 @@ import copy
 import logging
 import os
 import re
-import shutil
 import time
 from abc import ABC
 from pathlib import Path
@@ -56,9 +55,6 @@ def _try_to_extract_legacy_goal(goal: list):
     return legacy_goal
 
 
-_PROFILE_CLONE_CACHE: dict[str, str] = {}
-
-
 def _mint_per_worker_storage_state() -> Optional[str]:
     """Return a path to a freshly-minted Google storage_state for this PID.
 
@@ -67,10 +63,9 @@ def _mint_per_worker_storage_state() -> Optional[str]:
     on ``PYTHONPATH``, which ``benchmarks/_common.py`` and ``benchmark.py``
     already arrange) or by falling back to a path-based dynamic import via
     ``BROWSERGYM_STATE_POOL_HELPER``. Returns ``None`` if the helper is
-    unavailable, the auto-login subprocess fails, or
-    ``GOOGLE_USER_EMAIL`` / ``GOOGLE_USER_PASSWORD`` are unset; callers
-    fall back to the legacy persistent-profile / storage_state.json path
-    when this returns ``None``.
+    unavailable or the auto-login subprocess fails -- the caller turns
+    this into a hard ``RuntimeError`` so a failed mint never silently
+    falls back to a shared storage_state.
     """
     mint_fn = None
 
@@ -100,7 +95,7 @@ def _mint_per_worker_storage_state() -> Optional[str]:
         if mint_fn is None:
             logger.warning(
                 "BROWSERGYM_AUTO_LOGIN=1 but storage_state_pool is not "
-                "importable (%s). Falling back to legacy auth path.",
+                "importable (%s).",
                 exc,
             )
             return None
@@ -108,68 +103,12 @@ def _mint_per_worker_storage_state() -> Optional[str]:
     try:
         path = mint_fn()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Auto-login mint raised: %s. Falling back.", exc)
+        logger.warning("Auto-login mint raised: %s.", exc)
         return None
 
     if path is None:
         return None
     return str(path)
-
-
-def _clone_persistent_profile(source_profile: str) -> str:
-    """Return a per-process clone of ``source_profile``.
-
-    Each Ray worker (each PID) gets its own copy of the user-data-dir so that
-    multiple Chromium processes can run in parallel without colliding on
-    Chrome's per-profile SingletonLock. The clone is made once per worker and
-    reused across tasks scheduled to the same worker, so session cookies
-    accumulate naturally across tasks (matching single-worker behavior).
-
-    Singleton* symlinks from the source are skipped because they may dangle to
-    sockets owned by another Chrome process, which would otherwise make
-    ``shutil.copytree`` raise.
-    """
-    cached = _PROFILE_CLONE_CACHE.get(source_profile)
-    if cached and Path(cached).is_dir():
-        return cached
-
-    pool_root = Path(
-        os.environ.get(
-            "BROWSERGYM_PERSISTENT_POOL_DIR",
-            str(Path(source_profile).parent / ".bg_profile_pool"),
-        )
-    )
-    pool_root.mkdir(parents=True, exist_ok=True)
-
-    clone_dir = pool_root / f"worker_{os.getpid()}"
-    if not clone_dir.exists():
-        def _ignore_singletons(_src, names):
-            return [n for n in names if n.startswith("Singleton")]
-
-        logger.info(
-            "Cloning persistent profile %s -> %s for parallel worker.",
-            source_profile,
-            clone_dir,
-        )
-        shutil.copytree(
-            source_profile,
-            clone_dir,
-            symlinks=True,
-            ignore=_ignore_singletons,
-        )
-    else:
-        # Stale Singleton* from a previous Chromium under this PID would block
-        # re-launch. Defensive cleanup; usually a no-op.
-        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
-            entry = clone_dir / name
-            try:
-                if entry.is_symlink() or entry.exists():
-                    entry.unlink()
-            except OSError:
-                pass
-
-    _PROFILE_CLONE_CACHE[source_profile] = str(clone_dir)
-    return str(clone_dir)
 
 
 class BrowserEnv(gym.Env, ABC):
@@ -396,147 +335,59 @@ class BrowserEnv(gym.Env, ABC):
         ]
         args = [arg for arg in args if arg is not None]  # Remove None values
 
-        # Auth path #1 (preferred for parallel runs): per-worker storage_state
-        # minted on demand by the stealth Playwright login flow in
-        # ``scripts/google_auto_login.py``. Triggered by
-        # ``BROWSERGYM_AUTO_LOGIN=1`` (typically set via ``run.sh`` /
-        # ``benchmarks/_common.py`` when ``BROWSERGYM_AUTH_MODE=auto_login``).
-        # Each PID gets its own freshly-validated Google session, which
-        # sidesteps the cookie-rotation-collision problem that plagues
-        # cloned persistent profiles when 5 workers run in parallel. If
-        # minting fails (creds missing, 2FA challenge fired, etc.) we fall
-        # through to the legacy auth paths below so a flaky login doesn't
-        # abort the whole run.
-        auto_login_state: Optional[str] = None
+        # Per-worker auto-login is the only auth path. ``BROWSERGYM_AUTO_LOGIN=1``
+        # is set unconditionally by ``run.sh`` / ``benchmark.py`` /
+        # ``benchmarks/_common.py`` and triggers the stealth Playwright
+        # login flow in ``scripts/google_auto_login.py``. Each PID gets
+        # its own freshly-validated Google session at
+        # ``.bg_storage_state_pool/worker_<pid>.json`` -- two workers can
+        # never share a storage_state file. If minting fails (helper
+        # missing, creds missing, 2FA challenge fired, etc.) we raise
+        # immediately rather than silently launching Chromium against a
+        # shared snapshot, which would let two workers operate against
+        # the same Google session.
         if os.environ.get("BROWSERGYM_AUTO_LOGIN", "").lower() in ("1", "true", "yes"):
             auto_login_state = _mint_per_worker_storage_state()
-            if auto_login_state:
-                # Inject the freshly-minted snapshot into the stateless
-                # ``browser.new_context()`` branch below. The persistent-
-                # profile branch is intentionally bypassed when auto-login
-                # succeeds; per-worker minted snapshots already give us the
-                # parallelism guarantees the persistent-profile clone pool
-                # was working around.
-                self.pw_context_kwargs = dict(self.pw_context_kwargs)
-                self.pw_context_kwargs["storage_state"] = auto_login_state
-                logger.info(
-                    "Auto-login mint succeeded for pid=%d; storage_state=%s",
-                    os.getpid(),
-                    auto_login_state,
+            if auto_login_state is None:
+                raise RuntimeError(
+                    f"Per-worker auto-login mint FAILED for pid={os.getpid()}; "
+                    "refusing to fall back to a shared storage_state. Check "
+                    ".bg_storage_state_pool/debug/<pid>/ for the failure capture, "
+                    "and confirm GOOGLE_USER_EMAIL / GOOGLE_USER_PASSWORD are set."
                 )
-            else:
-                fallback_state = self.pw_context_kwargs.get("storage_state")
-                if fallback_state:
-                    logger.warning(
-                        "Auto-login mint FAILED for pid=%d; falling back to "
-                        "legacy storage_state=%s. Task auth may be stale -- "
-                        "check .bg_storage_state_pool/debug/<pid>/ for the "
-                        "screenshot + HTML captured at failure.",
-                        os.getpid(),
-                        fallback_state,
-                    )
-                else:
-                    logger.error(
-                        "Auto-login mint FAILED for pid=%d AND no fallback "
-                        "storage_state is configured. The Chromium that's "
-                        "about to launch has no Google auth -- expect tasks "
-                        "to time out on the sign-in page. Check "
-                        ".bg_storage_state_pool/debug/<pid>/ for the "
-                        "screenshot + HTML captured at failure.",
-                        os.getpid(),
-                    )
-
-        # Auth path #2 (legacy fallback): launch a persistent Chromium profile
-        # instead of a stateless browser+context pair. Triggered by setting
-        # BROWSERGYM_PERSISTENT_PROFILE to a user-data-dir path (e.g. an
-        # existing Playwright profile that's already signed into Google). This
-        # lets session-rotation cookies refresh themselves the way real Chrome
-        # does, which used to be the most reliable way to keep the agent
-        # signed in -- now superseded by the auto-login mint above for
-        # parallel runs, but kept as a fallback for single-worker debugging.
-        #
-        # Single-worker mode: a profile dir can only be opened by one Chromium
-        # process at a time. Set n_jobs=1 unless you opt into parallel mode.
-        # Parallel mode: setting BROWSERGYM_PERSISTENT_PARALLEL=1 makes each
-        # worker process clone the source profile to a per-PID directory under
-        # BROWSERGYM_PERSISTENT_POOL_DIR (default: <profile>/../.bg_profile_pool).
-        # The clone reuses the original Google session at startup and then
-        # evolves its own rotation cookies independently. Cleanup of dead-PID
-        # clones is handled by the driver (see benchmark.py).
-        persistent_profile = os.environ.get("BROWSERGYM_PERSISTENT_PROFILE")
-        # Only honor the persistent profile path when auto-login did not run
-        # successfully -- otherwise we'd double-up on auth and the
-        # persistent-profile branch would also strip the storage_state we
-        # just injected.
-        if auto_login_state:
-            persistent_profile = None
-
-        if persistent_profile and os.environ.get("BROWSERGYM_PERSISTENT_PARALLEL", "").lower() in (
-            "1",
-            "true",
-            "yes",
-        ):
-            persistent_profile = _clone_persistent_profile(persistent_profile)
-
-        if persistent_profile:
-            persistent_channel = os.environ.get("BROWSERGYM_PERSISTENT_CHANNEL", "chrome")
-            extra_persistent_args = [
-                a
-                for a in (
-                    "--profile-directory=Default",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-infobars",
-                )
-                if a not in args
-            ]
-            # storage_state is redundant (and rejected) when a user-data-dir is supplied.
-            persistent_context_kwargs = dict(self.pw_context_kwargs)
-            persistent_context_kwargs.pop("storage_state", None)
-
-            self.browser = None
-            self.context = pw.chromium.launch_persistent_context(
-                user_data_dir=persistent_profile,
-                channel=persistent_channel,
-                headless=self.headless,
-                slow_mo=slow_mo,
-                args=args + extra_persistent_args,
-                ignore_default_args=["--hide-scrollbars"],
-                no_viewport=True if self.resizeable_window else None,
-                viewport=viewport if not self.resizeable_window else None,
-                record_video_dir=(
-                    Path(self.record_video_dir) / "task_video" if self.record_video_dir else None
-                ),
-                record_video_size=viewport,
-                locale=locale,
-                timezone_id=timezone_id,
-                **persistent_context_kwargs,
-            )
-        else:
-            # create a new browser
-            self.browser = pw.chromium.launch(
-                headless=self.headless,
-                slow_mo=slow_mo,
-                args=args,
-                ignore_default_args=[
-                    "--hide-scrollbars"
-                ],  # otherwise the screenshot doesn't see the scrollbars
-                # will raise an Exception if above args are overriden
-                **self.pw_chromium_kwargs,
+            self.pw_context_kwargs = dict(self.pw_context_kwargs)
+            self.pw_context_kwargs["storage_state"] = auto_login_state
+            logger.info(
+                "Auto-login mint succeeded for pid=%d; storage_state=%s",
+                os.getpid(),
+                auto_login_state,
             )
 
-            # create a new browser context for pages
-            self.context = self.browser.new_context(
-                no_viewport=True if self.resizeable_window else None,
-                viewport=viewport if not self.resizeable_window else None,
-                record_video_dir=(
-                    Path(self.record_video_dir) / "task_video" if self.record_video_dir else None
-                ),
-                record_video_size=viewport,
-                locale=locale,
-                timezone_id=timezone_id,
-                # will raise an Exception if above args are overriden
-                **self.pw_context_kwargs,
-            )
+        # create a new browser
+        self.browser = pw.chromium.launch(
+            headless=self.headless,
+            slow_mo=slow_mo,
+            args=args,
+            ignore_default_args=[
+                "--hide-scrollbars"
+            ],  # otherwise the screenshot doesn't see the scrollbars
+            # will raise an Exception if above args are overriden
+            **self.pw_chromium_kwargs,
+        )
+
+        # create a new browser context for pages
+        self.context = self.browser.new_context(
+            no_viewport=True if self.resizeable_window else None,
+            viewport=viewport if not self.resizeable_window else None,
+            record_video_dir=(
+                Path(self.record_video_dir) / "task_video" if self.record_video_dir else None
+            ),
+            record_video_size=viewport,
+            locale=locale,
+            timezone_id=timezone_id,
+            # will raise an Exception if above args are overriden
+            **self.pw_context_kwargs,
+        )
 
         # set default timeout
         self.context.set_default_timeout(timeout)

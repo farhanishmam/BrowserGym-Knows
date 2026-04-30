@@ -15,66 +15,30 @@ REPO_ROOT="$(pwd)"
 export PYTHONPATH="$REPO_ROOT/AgentLab-Knows/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # -----------------------------------------------------------------------------
-# Authentication (snapshot mode)
+# Authentication (auto_login is the ONLY supported mode)
 # -----------------------------------------------------------------------------
-# We refresh storage_state.json from the persistent Chromium profile via
-# extract_auth_state.py (see refresh_auth() below) BEFORE every run_bench
-# call. All five Ray workers in a benchmark then share that snapshot.
+# Each Ray worker mints its own freshly-validated storage_state.json at
+# launch via scripts/google_auto_login.py, keyed on its PID. No two
+# workers ever share a storage_state file -- the per-worker mint pool at
+# .bg_storage_state_pool/worker_<pid>.json is the sole source of auth.
 #
-# This is the only approach that survives multi-hour runs: the persistent
-# profile eventually loses its session as Google rotates __Secure-1PSIDTS
-# under five concurrent workers, and there's no automated recovery once
-# that happens. Re-running extract_auth_state.py between splits forces a
-# clean re-auth using the credentials in .env.
-#
-# To switch to per-worker auto-mint (each worker opens the persistent
-# profile at task launch), set BROWSERGYM_AUTH_MODE=auto_login before
-# invoking this script. The legacy persistent_profile mode is still
-# selectable too.
-export BROWSERGYM_AUTH_MODE="${BROWSERGYM_AUTH_MODE:-snapshot}"
+# The legacy "snapshot" (every worker reads the same storage_state.json)
+# and "persistent_profile" (every worker shares an on-disk Chromium
+# profile) modes have been removed because both violated per-worker
+# isolation under parallel execution.
+export BROWSERGYM_AUTH_MODE="${BROWSERGYM_AUTH_MODE:-auto_login}"
 
-PROFILE_DIR="$REPO_ROOT/playwright_chrome_profile"
-STORAGE_STATE_FILE="$REPO_ROOT/storage_state.json"
+if [[ "$BROWSERGYM_AUTH_MODE" != "auto_login" ]]; then
+    echo "ERROR: only BROWSERGYM_AUTH_MODE=auto_login is supported (got '$BROWSERGYM_AUTH_MODE')." >&2
+    echo "       Per-worker storage_state is mandatory; snapshot/persistent_profile modes have been removed." >&2
+    exit 1
+fi
 
 if [[ -z "${GOOGLE_USER_EMAIL:-}" || -z "${GOOGLE_USER_PASSWORD:-}" ]]; then
     echo "ERROR: GOOGLE_USER_EMAIL / GOOGLE_USER_PASSWORD must be set in .env." >&2
-    echo "       extract_auth_state.py needs them to recover from a signed-out" >&2
-    echo "       persistent profile." >&2
+    echo "       The per-worker auto-login flow needs them to mint storage_state." >&2
     exit 1
 fi
-
-if [[ ! -d "$PROFILE_DIR" ]]; then
-    echo "ERROR: persistent Chrome profile not found at $PROFILE_DIR" >&2
-    echo "       Bootstrap it once with:" >&2
-    echo "         python extract_auth_state.py --headed" >&2
-    exit 1
-fi
-
-if [[ "$BROWSERGYM_AUTH_MODE" == "persistent_profile" ]]; then
-    export BROWSERGYM_PERSISTENT_PROFILE="$PROFILE_DIR"
-    export BROWSERGYM_PERSISTENT_CHANNEL="chrome"
-    export BROWSERGYM_PERSISTENT_POOL_DIR="$REPO_ROOT/.bg_profile_pool"
-    export BROWSERGYM_PERSISTENT_PARALLEL=1
-fi
-
-# Refresh storage_state.json by re-extracting from the persistent profile.
-# Used as a preflight before every run_bench so the snapshot can never go
-# more than one benchmark stale. Returns 0 on success, non-zero on failure
-# -- callers check the return code so they can warn but not abort the run.
-refresh_auth() {
-    echo "[run.sh] Refreshing auth state via extract_auth_state.py..."
-    if python "$REPO_ROOT/extract_auth_state.py" \
-        --output "$STORAGE_STATE_FILE" \
-        --profile-dir "$PROFILE_DIR" \
-        --headless \
-        --verbose 2>&1 | sed 's/^/  /'; then
-        echo "[run.sh] Auth refresh OK ($(date '+%H:%M:%S'))."
-        return 0
-    fi
-    echo "[run.sh] WARNING: auth refresh failed; benchmark will run on the" >&2
-    echo "         existing storage_state.json (possibly stale)." >&2
-    return 1
-}
 
 # -----------------------------------------------------------------------------
 # Parallelism (5 task instances per benchmark script)
@@ -228,10 +192,8 @@ run_bench() {
     fi
     echo "[run.sh] RUN   $results_root/$model_subdir/$split_subdir ($script, $benchmark)"
 
-    # Recover from any signed-out / stale state the previous benchmark
-    # may have left in the persistent profile. Failure is non-fatal: the
-    # benchmark will run on whatever storage_state.json is on disk.
-    refresh_auth || true
+    # No global auth preflight: each Ray worker mints its own
+    # storage_state at launch via scripts/google_auto_login.py.
 
     mkdir -p "$out_dir"
     AGENTLAB_EXP_ROOT="$out_dir" KNOWS_BENCHMARK="$benchmark" \
@@ -298,7 +260,9 @@ KNOWS_NEW_SPLITS=(
     knows_sheets_6
     knows_slides_17
     knows_slides_20
+    knows_sheets_25
     knows_sheets_38
+    knows_slides_39
 )
 
 # In selective mode we only target gpt (gpt55_*) on the axt and axt+ss

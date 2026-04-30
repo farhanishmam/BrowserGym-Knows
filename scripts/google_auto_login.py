@@ -781,7 +781,16 @@ def perform_login(
                     # Give Google a beat to set every cookie before snapshot.
                     time.sleep(1.5)
 
-                    _save_state(context, output)
+                    # ``_save_state_if_authed`` raises if the resulting
+                    # snapshot has no Google SID-family cookies. Without
+                    # this guard, a silent "Verify it's you" interstitial
+                    # that ends up redirecting back to docs.google.com
+                    # would be treated as a successful login by
+                    # ``_wait_for_login_complete`` and we'd write a tiny
+                    # (~800-byte) anonymous storage_state. The per-worker
+                    # mint pool would then hand that file to Chromium,
+                    # and every task would land on the sign-in page.
+                    _save_state_if_authed(context, output)
                 except AutoLoginError as exc:
                     # Capture screenshot + HTML + visible error so the
                     # operator has something to look at instead of a bare
