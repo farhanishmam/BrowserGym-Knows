@@ -15,7 +15,7 @@ exists and can be evaluated. The script:
    reflect the aggregated checkpoint score.
 
 Example:
-    python regrade_trial.py \
+    python scripts/regrade_trial.py \
         "results/2026-04-24_22-22-34_GenericAgent-..._on_knows.docs_1_formal_letter.4_20"
 """
 
@@ -31,10 +31,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
-_REPO_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 _BG_LOCAL_SRCS = [
     _REPO_ROOT / "browsergym" / "core" / "src",
     _REPO_ROOT / "browsergym" / "experiments" / "src",
+    _REPO_ROOT / "browsergym" / "knows",
     _REPO_ROOT / "browsergym" / "knows" / "src",
     _REPO_ROOT / "AgentLab-Knows" / "src",
 ]
@@ -198,30 +199,44 @@ def _find_task_class(exp_dir: Path) -> Type[Any]:
     from browsergym.knows.task import (  # type: ignore
         DocsFormalLetterTask,
         DocsInfluentialPapersTask,
+        SheetsMovieRecommendationTask,
         SheetsApartmentFinderTask,
         SheetsPersonalRecipeTask,
         SheetsStockTrackerTask,
+        SlidesBuyCarPresTask,
+        SlidesEventAnnouncementPosterTask,
         SlidesIllustratedBookReportTask,
+        SlidesPersonalLookbookPaintColorsTask,
         SlidesRemoveImagesAddPlaceholdersTask,
+        SlidesWikipediaPhotosTask,
     )
 
     family_to_task = {
         DocsFormalLetterTask.TASK_FAMILY_FOLDER: DocsFormalLetterTask,
         DocsInfluentialPapersTask.TASK_FAMILY_FOLDER: DocsInfluentialPapersTask,
+        SheetsMovieRecommendationTask.TASK_FAMILY_FOLDER: SheetsMovieRecommendationTask,
         SheetsApartmentFinderTask.TASK_FAMILY_FOLDER: SheetsApartmentFinderTask,
         SheetsPersonalRecipeTask.TASK_FAMILY_FOLDER: SheetsPersonalRecipeTask,
         SheetsStockTrackerTask.TASK_FAMILY_FOLDER: SheetsStockTrackerTask,
+        SlidesBuyCarPresTask.TASK_FAMILY_FOLDER: SlidesBuyCarPresTask,
+        SlidesEventAnnouncementPosterTask.TASK_FAMILY_FOLDER: SlidesEventAnnouncementPosterTask,
         SlidesIllustratedBookReportTask.TASK_FAMILY_FOLDER: SlidesIllustratedBookReportTask,
+        SlidesPersonalLookbookPaintColorsTask.TASK_FAMILY_FOLDER: SlidesPersonalLookbookPaintColorsTask,
         SlidesRemoveImagesAddPlaceholdersTask.TASK_FAMILY_FOLDER: SlidesRemoveImagesAddPlaceholdersTask,
     }
     prefix_to_task = {
         "docs_1_formal_letter": DocsFormalLetterTask,
         "docs_5_influential_papers": DocsInfluentialPapersTask,
+        "sheets_55_movie_recommendation": SheetsMovieRecommendationTask,
         "sheets_2_personal_recipe": SheetsPersonalRecipeTask,
         "sheets_6_stock_tracker": SheetsStockTrackerTask,
         "sheets_38_apartment_finder": SheetsApartmentFinderTask,
         "slides_20_illustrated_book_report": SlidesIllustratedBookReportTask,
         "slides_17_remove_images_add_placeholders": SlidesRemoveImagesAddPlaceholdersTask,
+        "slides_29_buy_car_pres": SlidesBuyCarPresTask,
+        "slides_39_personal_lookbook_paintcolors": SlidesPersonalLookbookPaintColorsTask,
+        "slides_51_event_announcement_poster": SlidesEventAnnouncementPosterTask,
+        "slides_30_wikipedia_photos": SlidesWikipediaPhotosTask,
     }
 
     data = _load_task_info(exp_dir)
@@ -283,22 +298,55 @@ def regrade(exp_dir: Path) -> Dict[str, Any]:
 
     # Old trials were run before doc_setup auto-shared each created doc with
     # the evaluator's service account. The evaluator authenticates as that
-    # service account, so without explicit sharing it can't see (and 404s on)
-    # docs sitting inside the user's personal Drive. Try a best-effort share
-    # here so re-grading those trials succeeds.
-    try:
-        from browsergym.knows.doc_setup import share_doc_with_service_account  # type: ignore
-
-        if share_doc_with_service_account(doc_id):
-            print(f"  Shared doc {doc_id} with the evaluator's service account.")
-        else:
-            print(
-                f"  Note: could not auto-share doc {doc_id} with the evaluator "
-                "(see warnings above). Grading may fail if the doc isn't "
-                "already accessible to the service account."
+    # service account, so without explicit sharing it can't see (and 403s on)
+    # docs sitting inside the user's personal Drive. Try a best-effort
+    # two-tier share here (Drive API first, then Playwright UI fallback that
+    # auto-refreshes storage_state.json when its cookies are stale) so
+    # re-grading those trials succeeds even when the original owner's
+    # session has aged past Google's rotation window.
+    #
+    # Set ``KNOWS_SKIP_REGRADE_SHARE=1`` to skip the share entirely (useful
+    # when you know the SA already has access) and
+    # ``KNOWS_DISABLE_UI_SHARE_FALLBACK=1`` to skip just the Playwright tier.
+    if os.environ.get("KNOWS_SKIP_REGRADE_SHARE", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }:
+        print(f"  Skipping share step (KNOWS_SKIP_REGRADE_SHARE set).")
+    else:
+        try:
+            from browsergym.knows.share_ui_fallback import (  # type: ignore
+                share_doc_with_fallback,
+                kind_from_split_or_family,
             )
-    except Exception as exc:  # noqa: BLE001 - best-effort
-        print(f"  Warning: doc-share helper raised: {exc}")
+
+            # Prefer the recorded task family (set by the runner) over the
+            # directory-name guess so re-grading a Sheets trial doesn't
+            # accidentally drive a Docs-shaped Share dialog.
+            kind: Optional[str] = None
+            data = _load_task_info(exp_dir)
+            workspace_kind = data.get("workspace_kind")
+            if isinstance(workspace_kind, str) and workspace_kind:
+                kind = workspace_kind
+            if kind is None:
+                family = data.get("task_family")
+                if isinstance(family, str) and family:
+                    kind = kind_from_split_or_family(family)
+            if kind is None:
+                kind = kind_from_split_or_family(exp_dir.name)
+
+            if share_doc_with_fallback(doc_id, kind=kind):
+                print(
+                    f"  Shared doc {doc_id} (kind={kind}) with the evaluator's "
+                    "service account."
+                )
+            else:
+                print(
+                    f"  Note: could not auto-share doc {doc_id} with the evaluator "
+                    "(see warnings above). Grading may fail if the doc isn't "
+                    "already accessible to the service account."
+                )
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            print(f"  Warning: doc-share helper raised: {exc}")
 
     evaluator = task._load_evaluator()
 
@@ -379,7 +427,30 @@ def main() -> int:
         type=Path,
         help="Path to the trial directory (the one containing summary_info.json).",
     )
+    parser.add_argument(
+        "--no-share",
+        action="store_true",
+        help=(
+            "Skip the auto-share step entirely (sets KNOWS_SKIP_REGRADE_SHARE=1). "
+            "Use when the SA already has access and you don't want to wait on "
+            "the share-fallback path."
+        ),
+    )
+    parser.add_argument(
+        "--no-ui-share-fallback",
+        action="store_true",
+        help=(
+            "Try the Drive API share but skip the Playwright UI fallback "
+            "(sets KNOWS_DISABLE_UI_SHARE_FALLBACK=1). Useful when "
+            "storage_state.json is stale and you'd rather just record a 0."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.no_share:
+        os.environ["KNOWS_SKIP_REGRADE_SHARE"] = "1"
+    if args.no_ui_share_fallback:
+        os.environ["KNOWS_DISABLE_UI_SHARE_FALLBACK"] = "1"
 
     try:
         regrade(args.exp_dir.resolve())

@@ -40,7 +40,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(_new_pp)
 # ``auto_login`` is a hard error.
 _STATE_POOL_DIR = _repo_root / ".bg_storage_state_pool"
 _STATE_POOL_HELPER = _repo_root / "scripts" / "storage_state_pool.py"
-_DESIRED_PARALLEL_JOBS = 5
+_DESIRED_PARALLEL_JOBS = 2
 
 _AUTH_MODE = os.environ.get("BROWSERGYM_AUTH_MODE", "auto_login").strip().lower()
 if _AUTH_MODE != "auto_login":
@@ -220,9 +220,9 @@ else:
     )
 study.dir.mkdir(parents=True, exist_ok=True)
 
-# Run the study. Auto-login mints per-worker storage_state files, so any
-# number of parallel workers is safe -- we cap at _DESIRED_PARALLEL_JOBS,
-# bounded by the number of tasks in the benchmark.
+# Run the study. Auto-login mints per-worker storage_state files, but all
+# workers still authenticate as the same Google account, so keep the default
+# conservative and cap it by the number of tasks in the benchmark.
 _n_jobs = min(_DESIRED_PARALLEL_JOBS, len(benchmark.env_args_list))
 
 study.run(n_jobs=_n_jobs)

@@ -66,6 +66,15 @@ def _mint_per_worker_storage_state() -> Optional[str]:
     unavailable or the auto-login subprocess fails -- the caller turns
     this into a hard ``RuntimeError`` so a failed mint never silently
     falls back to a shared storage_state.
+
+    By default, every call asks the mint pool to refresh the snapshot
+    (``force=True``), which bypasses the pool's stale-after-N-minutes
+    fast-path. That guarantees each ``BrowserEnv.reset()`` starts the
+    Chromium context with a freshly-validated Google session instead of
+    a partially-aged one inherited from a previous task on the same
+    worker. Set ``BROWSERGYM_AUTO_LOGIN_FORCE_ON_RESET=0`` to fall back
+    to the old TTL-based behavior (saves ~5-15 s per reset, at the cost
+    of starting some tasks with a near-expired cookie set).
     """
     mint_fn = None
 
@@ -100,8 +109,23 @@ def _mint_per_worker_storage_state() -> Optional[str]:
             )
             return None
 
+    force_refresh = os.environ.get(
+        "BROWSERGYM_AUTO_LOGIN_FORCE_ON_RESET", "1"
+    ).lower() in ("1", "true", "yes")
+
     try:
-        path = mint_fn()
+        if force_refresh:
+            try:
+                path = mint_fn(force=True)
+            except TypeError:
+                # Older helper module without the ``force=`` kwarg --
+                # fall back to the legacy call so we don't crash.
+                logger.debug(
+                    "mint helper does not accept force=; using TTL-based mint."
+                )
+                path = mint_fn()
+        else:
+            path = mint_fn()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Auto-login mint raised: %s.", exc)
         return None

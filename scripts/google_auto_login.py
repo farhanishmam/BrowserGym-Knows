@@ -378,6 +378,102 @@ def _wait_for_login_complete(page: Page, *, timeout_ms: int) -> None:
     )
 
 
+def _click_account_chooser_if_present(
+    page: Page,
+    *,
+    email: str,
+    timeout_ms: int,
+) -> bool:
+    """Handle Google's account chooser before the identifier/password forms.
+
+    Returns True when the caller still needs to fill the email field. Returns
+    False when selecting an existing account should have advanced to password.
+    """
+    short_timeout = min(timeout_ms, 5000)
+    try:
+        page.locator('input[type="email"]').first.wait_for(
+            state="visible",
+            timeout=short_timeout,
+        )
+        return True
+    except PlaywrightTimeoutError:
+        pass
+
+    try:
+        account = page.get_by_text(email, exact=False).first
+        if account.is_visible(timeout=1500):
+            account.click(timeout=3000)
+            return False
+    except Exception:  # noqa: BLE001 -- account chooser variants are best-effort
+        pass
+
+    for label in ("Use another account", "Add account"):
+        try:
+            option = page.get_by_text(label, exact=True).first
+            if option.is_visible(timeout=1500):
+                option.click(timeout=3000)
+                page.locator('input[type="email"]').first.wait_for(
+                    state="visible",
+                    timeout=timeout_ms,
+                )
+                return True
+        except Exception:  # noqa: BLE001 -- try the next known chooser label
+            continue
+
+    return True
+
+
+def _drive_credentials_flow_on_page(page: Page, *, timeout_ms: int) -> None:
+    """Run the email/password sign-in flow on an existing Playwright page."""
+    email, password = _read_credentials()
+
+    page.goto(_LOGIN_URL, timeout=timeout_ms, wait_until="domcontentloaded")
+    needs_email = _click_account_chooser_if_present(
+        page,
+        email=email,
+        timeout_ms=timeout_ms,
+    )
+
+    if needs_email:
+        _wait_and_fill(
+            page,
+            'input[type="email"]',
+            email,
+            timeout_ms=timeout_ms,
+            description="email",
+        )
+        _submit_form(
+            page,
+            submit_locator="#identifierNext button",
+            description="identifier",
+        )
+
+    # Google routes the password input through /signin/challenge/pwd in the
+    # modern flow; that URL is the normal second step, not a 2FA challenge.
+    page.wait_for_selector(
+        'input[type="password"]',
+        state="visible",
+        timeout=timeout_ms,
+    )
+    time.sleep(1.2)
+    _wait_and_fill(
+        page,
+        'input[type="password"]',
+        password,
+        timeout_ms=timeout_ms,
+        description="password",
+    )
+    _submit_form(
+        page,
+        submit_locator="#passwordNext button",
+        description="password",
+    )
+
+    _wait_for_navigation_off_password(page, timeout_ms=timeout_ms)
+    _wait_for_login_complete(page, timeout_ms=timeout_ms)
+    time.sleep(1.5)
+
+
 def _save_state(context: BrowserContext, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     context.storage_state(path=str(output))
@@ -519,16 +615,21 @@ def _perform_profile_extract(
                 )
                 # Brief settle so any post-load redirects + cookie sets
                 # complete before we snapshot.
-                deadline = time.time() + (_PROFILE_SETTLE_TIMEOUT_MS / 1000.0)
+                settle_timeout_ms = (
+                    max(_PROFILE_SETTLE_TIMEOUT_MS, timeout_ms)
+                    if not headless
+                    else _PROFILE_SETTLE_TIMEOUT_MS
+                )
+                deadline = time.time() + (settle_timeout_ms / 1000.0)
                 while time.time() < deadline:
                     url = page.url
                     if "accounts.google.com" in url and "ServiceLogin" in url:
-                        raise AutoLoginError(
-                            "Persistent profile is signed out (landed on "
-                            f"{url!r}). Re-bootstrap with: "
-                            "`python scripts/google_auto_login.py --headed "
-                            "--mode profile --output storage_state.json`"
+                        logger.info(
+                            "Persistent profile is signed out; repairing it "
+                            "with the credentials flow inside the same profile."
                         )
+                        _drive_credentials_flow_on_page(page, timeout_ms=timeout_ms)
+                        break
                     if "docs.google.com" in url and "ServiceLogin" not in url:
                         break
                     time.sleep(0.4)
@@ -717,70 +818,7 @@ def perform_login(
 
             page = context.new_page()
             try:
-                page.goto(_LOGIN_URL, timeout=timeout_ms, wait_until="domcontentloaded")
-
                 try:
-                    # Step 1: identifier (email) page.
-                    _wait_and_fill(
-                        page,
-                        'input[type="email"]',
-                        email,
-                        timeout_ms=timeout_ms,
-                        description="email",
-                    )
-                    _submit_form(
-                        page,
-                        submit_locator="#identifierNext button",
-                        description="identifier",
-                    )
-
-                    # Step 2: password page. Google routes the password input
-                    # through ``/v3/signin/challenge/pwd`` in the modern flow
-                    # -- confusing because the URL contains ``challenge`` even
-                    # though this is the normal next step, not a 2FA prompt.
-                    # We wait for either the password form to render or that
-                    # URL to appear so the rest of the script knows we're
-                    # ready to type.
-                    page.wait_for_selector(
-                        'input[type="password"]',
-                        state="visible",
-                        timeout=timeout_ms,
-                    )
-                    time.sleep(1.2)
-                    _wait_and_fill(
-                        page,
-                        'input[type="password"]',
-                        password,
-                        timeout_ms=timeout_ms,
-                        description="password",
-                    )
-                    # Submit via Enter instead of clicking a Next button.
-                    # Earlier failures were caused by the button-click path
-                    # silently no-op'ing (some Google A/B variants render the
-                    # Next button outside the input's containing form, so the
-                    # JS submit handler never fired). Pressing Enter on the
-                    # focused password input is the most reliable trigger.
-                    _submit_form(
-                        page,
-                        submit_locator="#passwordNext button",
-                        description="password",
-                    )
-
-                    # Step 3a: wait for navigation away from the password URL.
-                    # Without this, _wait_for_login_complete below would
-                    # immediately observe ``/signin/challenge/pwd`` (because
-                    # the post-submit redirect hasn't started yet) and could
-                    # time out without any actionable diagnostics.
-                    _wait_for_navigation_off_password(page, timeout_ms=timeout_ms)
-
-                    # Step 3b: settle on docs.google.com (or
-                    # myaccount.google.com) to confirm we have a working
-                    # session, or detect a real 2FA challenge.
-                    _wait_for_login_complete(page, timeout_ms=timeout_ms)
-
-                    # Give Google a beat to set every cookie before snapshot.
-                    time.sleep(1.5)
-
                     # ``_save_state_if_authed`` raises if the resulting
                     # snapshot has no Google SID-family cookies. Without
                     # this guard, a silent "Verify it's you" interstitial
@@ -790,6 +828,7 @@ def perform_login(
                     # (~800-byte) anonymous storage_state. The per-worker
                     # mint pool would then hand that file to Chromium,
                     # and every task would land on the sign-in page.
+                    _drive_credentials_flow_on_page(page, timeout_ms=timeout_ms)
                     _save_state_if_authed(context, output)
                 except AutoLoginError as exc:
                     # Capture screenshot + HTML + visible error so the
