@@ -8,9 +8,9 @@ The benchmark is configurable: callers can either pass it explicitly (via
 the `benchmark_name=` kwarg) or, more commonly, set the `KNOWS_BENCHMARK`
 env var before launching the script. This is what `run.sh` does so the
 same per-model script can be reused across `knows_docs_1`, `knows_sheets_2`,
-`knows_docs_5`, `knows_sheets_6`, `knows_slides_17`, `knows_slides_20`,
-`knows_sheets_25`, `knows_sheets_38`, and `knows_slides_39` without
-duplicating files per split.
+`knows_docs_5`, `knows_sheets_6`, `knows_sheets_10`, `knows_slides_17`,
+`knows_slides_20`, `knows_sheets_25`, `knows_sheets_38`,
+`knows_slides_39`, and `knows_sheets_55` without duplicating files per split.
 
 Authentication strategy (mirrors the top-level `benchmark.py`):
   ``auto_login`` is the only supported mode. Each Ray worker runs
@@ -82,10 +82,11 @@ os.environ["PYTHONPATH"] = os.pathsep.join(_new_pp)
 _STATE_POOL_DIR = _REPO_ROOT / ".bg_storage_state_pool"
 _STATE_POOL_HELPER = _REPO_ROOT / "scripts" / "storage_state_pool.py"
 
-# Default cap on parallel workers per study. Override per-script via the
-# `n_jobs=` argument to `run_knows_benchmark`, or globally (e.g. from
-# `run.sh`) via the `BROWSERGYM_N_JOBS` env var.
-DEFAULT_PARALLEL_JOBS = 5
+# Default cap on parallel workers per study. Keep this conservative because
+# Google can invalidate same-account sessions when too many workers run at once.
+# Override per-script via the `n_jobs=` argument to `run_knows_benchmark`, or
+# globally (e.g. from `run.sh`) via the `BROWSERGYM_N_JOBS` env var.
+DEFAULT_PARALLEL_JOBS = 2
 
 # ``auto_login`` is the only mode the harness will accept. The constant
 # names are kept (rather than removed) so external callers and the smoke

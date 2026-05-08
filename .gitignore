@@ -5,6 +5,10 @@ playwright_chrome_profile
 .idea/
 docs/src/generated/
 service-account.json
+
+# Run artifacts -- never commit logs/screenshots from local benchmark runs.
+logs/
+_debug_artifacts/
 # Google auth — never commit credentials
 **/auth-data/service-account.json
 **/auth-data/token.json
@@ -539,3 +543,4 @@ template_features_page_2.png
 template_features_page_3.png
 template_features_page_4.png
 storage_state.json
+service-account.json
