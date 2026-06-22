@@ -66,8 +66,13 @@ run_common::bootstrap_env() {
         return 1
     fi
 
-    # Default to 2 workers to reduce same-account Google session churn.
-    export BROWSERGYM_N_JOBS="${BROWSERGYM_N_JOBS:-2}"
+    # Default to 1 worker. All per-PID storage_state snapshots derive from
+    # the same Google account, so Google's server-side __Secure-1PSIDTS
+    # rotation invalidates every concurrent session except one whenever
+    # it fires mid-trial (observed reliably on slides_26 with N_JOBS=5:
+    # 4-of-5 trials terminated as auth_lost_mid_episode after ~25 min).
+    # Bumping above 1 is only safe with a multi-account auth pool.
+    export BROWSERGYM_N_JOBS="${BROWSERGYM_N_JOBS:-1}"
 
     # Extra goal instructions appended to every task's goal text by
     # KnowsBenchTask.setup(). Restating the credentials here lets the agent

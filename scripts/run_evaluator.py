@@ -16,7 +16,9 @@ Available splits
     sheets_2  → sheets_2_personal_recipe_foodcomposition
     sheets_6  → sheets_6_investmenttracker
     sheets_10 → sheets_10_paper_sorting
+    sheets_7  → sheets_7_running_analysis
     sheets_25 → sheets_25_skitourplan
+    sheets_28 → sheets_28_personal_travel_planner
     sheets_38 → sheets_38_apartment_finder
     sheets_45 → sheets_45_Personal_WeddingPlanner_weddingcolorpallette
     sheets_55 → sheets_55_Movie_Recommendation
@@ -43,14 +45,24 @@ The auto-share step is two-tiered, mirroring `create_task_workspace`:
 
 1. Drive API call (`share_doc_with_service_account`). Idempotent: a
    doc the service account already has access to short-circuits here.
-2. Playwright UI fallback (`share_workspace_via_ui_standalone`). Only
-   runs when the API call returns False. Uses `storage_state.json` to
-   open the file owner's session, drives the Share dialog, adds the
-   service account email, and clicks Send.
+2. Playwright UI fallback (`share_workspace_via_ui_standalone`). Always
+   runs when the API call returns False, using `storage_state.json` to
+   open the file owner's session, drive the Share dialog, add the
+   service account email, and click Send. If `storage_state.json` is
+   missing or stale and the headless re-mint also fails, the script
+   auto-prompts (Y/n) and launches `scripts/google_auto_login.py
+   --headed` so the operator can satisfy any first-run device-trust /
+   2-Step Verification challenge in a real browser window.
 
 The kind (docs / sheets / slides) is inferred from `--split` so the
-fallback hits the right URL pattern automatically. Set
-`KNOWS_DISABLE_UI_SHARE_FALLBACK=1` to disable the second tier.
+fallback hits the right URL pattern automatically. Knobs:
+
+- `--no-share`              : skip auto-sharing entirely.
+- `--no-ui-share-fallback`  : try the Drive API tier only.
+- `--no-auto-prompt`        : skip the headed-login Y/n prompt; just
+                              print a hint and continue.
+- `KNOWS_DISABLE_UI_SHARE_FALLBACK=1` : disable tier 2.
+- `KNOWS_DISABLE_AUTO_PROMPT_LOGIN=1` : disable the headed-login prompt.
 """
 
 from __future__ import annotations
@@ -124,6 +136,8 @@ def _build_split_map():
         SheetsMovieRecommendationTask,
         SheetsPaperSortingTask,
         SheetsPersonalRecipeTask,
+        SheetsPersonalTravelPlannerTask,
+        SheetsRunningAnalysisTask,
         SheetsSkiTourPlanTask,
         SheetsStockTrackerTask,
         SheetsWeddingPlannerTask,
@@ -144,7 +158,9 @@ def _build_split_map():
         "sheets_2": SheetsPersonalRecipeTask,
         "sheets_6": SheetsStockTrackerTask,
         "sheets_10": SheetsPaperSortingTask,
+        "sheets_7": SheetsRunningAnalysisTask,
         "sheets_25": SheetsSkiTourPlanTask,
+        "sheets_28": SheetsPersonalTravelPlannerTask,
         "sheets_38": SheetsApartmentFinderTask,
         "sheets_45": SheetsWeddingPlannerTask,
         "sheets_55": SheetsMovieRecommendationTask,
@@ -156,6 +172,16 @@ def _build_split_map():
         "slides_39": SlidesPersonalLookbookPaintColorsTask,
         "slides_51": SlidesEventAnnouncementPosterTask,
     }
+
+
+def _result_has_fetch_permission_error(result) -> bool:
+    """True when grading failed because the service account could not read the doc."""
+    for cp in result.get_detailed_report().get("checkpoints", []):
+        for step in cp.get("steps", []):
+            details = step.get("details") or ""
+            if "Error fetching document content" in details:
+                return True
+    return False
 
 
 def _share_doc(doc_id: str, *, kind: Optional[str]) -> None:
@@ -221,6 +247,18 @@ def run(split: str, instance: int, doc_id: str, *, share: bool = True) -> None:
 
     result = grade_fn(**call_kwargs)
 
+    if not share and _result_has_fetch_permission_error(result):
+        print(
+            "\n[run_evaluator] Service account cannot read this document "
+            "(likely not shared yet). Retrying with auto-share...\n",
+            file=sys.stderr,
+        )
+        from browsergym.knows.share_ui_fallback import kind_from_split_or_family  # type: ignore
+
+        _share_doc(doc_id, kind=kind_from_split_or_family(split))
+        print()
+        result = grade_fn(**call_kwargs)
+
     # -----------------------------------------------------------------------
     # Print results
     # -----------------------------------------------------------------------
@@ -268,6 +306,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--no-auto-prompt",
+        action="store_true",
+        help=(
+            "Skip the interactive Y/n prompt that auto-launches "
+            "`google_auto_login.py --headed` when the headless mint of "
+            "storage_state.json fails (sets KNOWS_DISABLE_AUTO_PROMPT_LOGIN=1). "
+            "By default the prompt runs whenever the script is attached to "
+            "a TTY so first-run device trust / 2SV challenges can be "
+            "completed without re-running the harness manually."
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Keep generated files after evaluation (sets DEBUG=true)",
@@ -280,6 +330,9 @@ def main() -> None:
 
     if args.no_ui_share_fallback:
         os.environ["KNOWS_DISABLE_UI_SHARE_FALLBACK"] = "1"
+
+    if args.no_auto_prompt:
+        os.environ["KNOWS_DISABLE_AUTO_PROMPT_LOGIN"] = "1"
 
     run(args.split, args.instance, args.doc_id, share=not args.no_share)
 

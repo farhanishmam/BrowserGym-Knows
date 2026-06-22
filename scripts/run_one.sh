@@ -33,9 +33,17 @@ fi
 
 SCRIPT="$1"
 BENCHMARK="$2"
-N_JOBS="${3:-${BROWSERGYM_N_JOBS:-5}}"
+# Default to 1 worker because all per-PID storage_state mints derive from
+# the same Google account, and Google's server-side __Secure-1PSIDTS
+# rotation invalidates every concurrent session except one whenever it
+# fires (see benchmarks/_common.py and scripts/extract_auth_state.py).
+# Bumping this above 1 only makes sense after a multi-account auth pool
+# is wired up. Caller can still opt in explicitly via the 3rd positional
+# arg or BROWSERGYM_N_JOBS.
+N_JOBS="${3:-${BROWSERGYM_N_JOBS:-1}}"
 
-cd "$(dirname "$0")"
+# This script lives in scripts/; the repo root is its parent directory.
+cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 export REPO_ROOT
 

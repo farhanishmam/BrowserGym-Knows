@@ -8,7 +8,8 @@
 #     SELECTIVE_REQUIRED_INSTANCES=N ./run_selective.sh
 
 set -euo pipefail
-cd "$(dirname "$0")"
+# This script lives in scripts/; the repo root is its parent directory.
+cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 export REPO_ROOT
 
@@ -20,22 +21,8 @@ KNOWS_NEW_SPLITS=(
     knows_docs_1
     knows_sheets_2
     knows_docs_5
-    knows_sheets_6
-    knows_sheets_10
-    knows_docs_11
-    knows_slides_17
-    knows_slides_20
-    knows_sheets_25
-    knows_slides_26
-    knows_slides_29
-    knows_slides_30
-    knows_docs_31
-    knows_docs_37
-    knows_sheets_38
-    knows_slides_39
-    knows_sheets_45
-    knows_slides_51
-    knows_sheets_55
+    knows_sheets_6 
+    #add nore splits here
 )
 
 # In selective mode we only target gpt (gpt55_*) on the axt and axt+ss

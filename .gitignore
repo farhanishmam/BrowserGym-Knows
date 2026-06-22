@@ -5,6 +5,7 @@ playwright_chrome_profile
 .idea/
 docs/src/generated/
 service-account.json
+.github
 
 # Run artifacts -- never commit logs/screenshots from local benchmark runs.
 logs/
@@ -544,3 +545,5 @@ template_features_page_3.png
 template_features_page_4.png
 storage_state.json
 service-account.json
+sheets_7_atlas_eval_results.json
+storage_state.json

@@ -450,11 +450,25 @@ def _drive_credentials_flow_on_page(page: Page, *, timeout_ms: int) -> None:
 
     # Google routes the password input through /signin/challenge/pwd in the
     # modern flow; that URL is the normal second step, not a 2FA challenge.
-    page.wait_for_selector(
-        'input[type="password"]',
-        state="visible",
-        timeout=timeout_ms,
-    )
+    # If it never appears, Google is almost always showing a passkey /
+    # device-prompt / "Verify it's you" interstitial instead -- we can't
+    # clear those headlessly, so surface the URL + a captured screenshot
+    # via AutoLoginError so the operator knows to re-bootstrap.
+    try:
+        page.wait_for_selector(
+            'input[type="password"]',
+            state="visible",
+            timeout=timeout_ms,
+        )
+    except PlaywrightTimeoutError as exc:
+        raise AutoLoginError(
+            "Password input never appeared after submitting email "
+            f"(URL: {page.url!r}). Google is most likely showing a "
+            "passkey / 2-Step Verification prompt; the headless flow "
+            "cannot clear those. Re-bootstrap with `python "
+            "scripts/google_auto_login.py --headed --mode profile` and "
+            "complete the prompt once."
+        ) from exc
     time.sleep(1.2)
     _wait_and_fill(
         page,

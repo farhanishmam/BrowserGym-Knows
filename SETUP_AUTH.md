@@ -91,7 +91,7 @@ All knobs are env vars; defaults are in parentheses.
 | `GOOGLE_USER_PASSWORD` | _(required)_ | Password for that account. |
 | `BROWSERGYM_STATE_POOL_DIR` | `<repo>/.bg_storage_state_pool` | Where per-PID `worker_<pid>.json` snapshots live. |
 | `BROWSERGYM_STATE_POOL_TTL` | `1500` (25 min) | How fresh a snapshot must be (seconds) before re-minting on a worker's next call. |
-| `BROWSERGYM_N_JOBS` | `5` | Parallel Ray worker count. Per-worker minting means there is no parallelism cap from the auth path. |
+| `BROWSERGYM_N_JOBS` | `1` | Parallel Ray worker count. Pinned to 1 because every per-PID `worker_<pid>.json` snapshot derives from the same Google account, so they all carry the same `__Secure-1PSID`. Google's server-side `__Secure-1PSIDTS` rotation invalidates every concurrent session except one whenever it fires (slides_26 with `N_JOBS=5` had 4-of-5 trials terminate as `auth_lost_mid_episode`). Bump above 1 only after wiring in a multi-account auth pool. |
 
 ## Troubleshooting
 

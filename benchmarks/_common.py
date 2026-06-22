@@ -82,11 +82,20 @@ os.environ["PYTHONPATH"] = os.pathsep.join(_new_pp)
 _STATE_POOL_DIR = _REPO_ROOT / ".bg_storage_state_pool"
 _STATE_POOL_HELPER = _REPO_ROOT / "scripts" / "storage_state_pool.py"
 
-# Default cap on parallel workers per study. Keep this conservative because
-# Google can invalidate same-account sessions when too many workers run at once.
-# Override per-script via the `n_jobs=` argument to `run_knows_benchmark`, or
-# globally (e.g. from `run.sh`) via the `BROWSERGYM_N_JOBS` env var.
-DEFAULT_PARALLEL_JOBS = 2
+# Default cap on parallel workers per study. Pinned to 1 because every
+# per-PID ``worker_<pid>.json`` snapshot ends up carrying the same Google
+# ``__Secure-1PSID`` (we only have one user account). When 2+ workers
+# share that SID, Google's server-side ``__Secure-1PSIDTS`` rotation
+# invalidates every concurrent session except whichever one happens to
+# observe the rotation first -- in practice 4-of-5 trials get bumped to
+# ``accounts.google.com/v3/signin/rejected`` mid-episode and finalize
+# with ``auth_lost_mid_episode = True``.
+#
+# Override per-script via the ``n_jobs=`` argument to
+# ``run_knows_benchmark``, or globally (e.g. from ``run.sh``) via the
+# ``BROWSERGYM_N_JOBS`` env var. Bumping above 1 is only safe once the
+# auth pool grows past a single account.
+DEFAULT_PARALLEL_JOBS = 1
 
 # ``auto_login`` is the only mode the harness will accept. The constant
 # names are kept (rather than removed) so external callers and the smoke
@@ -286,8 +295,11 @@ def run_knows_benchmark(
             safe.
         results_dir: Optional override for where the study writes outputs.
 
-    Evaluators are disabled by default; set ``KNOWS_RUN_EVALUATORS=1`` to
-    grade each task at DONE/finalize time.
+    Evaluators run inline by default — every benchmark task grades itself
+    at DONE / finalize time and writes per-checkpoint scores into
+    ``task_info.json`` / ``summary_info.json`` plus a per-trial
+    ``eval.log`` next to ``experiment.log``. Set ``KNOWS_RUN_EVALUATORS=0``
+    to skip grading (e.g. for cheap dry-runs that only collect screenshots).
     """
 
     benchmark_name = _resolve_benchmark_name(benchmark_name)
@@ -324,7 +336,7 @@ def run_knows_benchmark(
             resolved_task_names,
             benchmark_name_suffix="selected",
         )
-    run_evaluators = _env_flag("KNOWS_RUN_EVALUATORS", default=False)
+    run_evaluators = _env_flag("KNOWS_RUN_EVALUATORS", default=True)
 
     print(
         f"[_common] running benchmark={benchmark.name} agent={agent.agent_name} "

@@ -22,14 +22,16 @@ Example:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import gzip
 import json
 import os
 import pickle
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _BG_LOCAL_SRCS = [
@@ -183,14 +185,61 @@ def _find_instance_id(exp_dir: Path) -> Optional[int]:
     return None
 
 
+def _collect_urls_from_steps(exp_dir: Path) -> List[str]:
+    """Recover visited URLs from ``step_*.pkl.gz`` when task_info was never written."""
+    urls: List[str] = []
+    seen: set[str] = set()
+
+    def _add(url: str) -> None:
+        url = (url or "").strip()
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+
+    step_paths = sorted(
+        exp_dir.glob("step_*.pkl.gz"),
+        key=lambda p: int(re.search(r"step_(\d+)", p.name).group(1)),
+    )
+    for step_path in step_paths:
+        try:
+            with gzip.open(step_path, "rb") as f:
+                step = pickle.load(f)
+        except Exception as exc:
+            print(f"  Warning: failed to load {step_path.name} for history: {exc}")
+            continue
+        obs = getattr(step, "obs", None) or {}
+        if not isinstance(obs, dict):
+            continue
+        for history_key in ("visited", "visited_urls"):
+            for entry in obs.get(history_key, []) or []:
+                _add(entry.get("url", "") if isinstance(entry, dict) else str(entry))
+        for key in ("url", "current_url"):
+            _add(str(obs.get(key, "") or ""))
+    return urls
+
+
 def _find_browsing_history(exp_dir: Path) -> List[str]:
+    """Recover the agent's browsing history from a completed trial.
+
+    Reads both ``visited`` (canonical) and ``visited_urls`` (legacy)
+    keys and returns order-preserving unique URL strings, matching
+    :meth:`KnowsWorkspaceTask._visited_url_strings`. Falls back to
+    ``step_*.pkl.gz`` observations when ``task_info.json`` was never
+    written (common for interrupted or legacy trial directories).
+    """
     data = _load_task_info(exp_dir)
     urls: List[str] = []
+    seen: set[str] = set()
     for history_key in ("visited", "visited_urls"):
         for entry in data.get(history_key, []) or []:
-            url = _url_from_entry(entry)
-            if url:
+            url = entry.get("url", "") if isinstance(entry, dict) else str(entry)
+            if url and url not in seen:
+                seen.add(url)
                 urls.append(url)
+    if not urls:
+        urls = _collect_urls_from_steps(exp_dir)
+        if urls:
+            print(f"  Recovered {len(urls)} URL(s) from step_*.pkl.gz browsing history.")
     return urls
 
 
@@ -199,14 +248,24 @@ def _find_task_class(exp_dir: Path) -> Type[Any]:
     from browsergym.knows.task import (  # type: ignore
         DocsFormalLetterTask,
         DocsInfluentialPapersTask,
+        DocsPersonalRecipeOcrTask,
+        DocsEducationLessonPlanTask,
+        DocsReferenceListTask,
         SheetsMovieRecommendationTask,
+        SheetsPaperSortingTask,
         SheetsApartmentFinderTask,
         SheetsPersonalRecipeTask,
+        SheetsPersonalTravelPlannerTask,
+        SheetsRunningAnalysisTask,
+        SheetsSkiTourPlanTask,
         SheetsStockTrackerTask,
+        SheetsWeddingPlannerTask,
+        SlidesBasicEducationalSlideDeckTask,
         SlidesBuyCarPresTask,
         SlidesEventAnnouncementPosterTask,
         SlidesIllustratedBookReportTask,
         SlidesPersonalLookbookPaintColorsTask,
+        SlidesProductComparisonTask,
         SlidesRemoveImagesAddPlaceholdersTask,
         SlidesWikipediaPhotosTask,
     )
@@ -214,29 +273,51 @@ def _find_task_class(exp_dir: Path) -> Type[Any]:
     family_to_task = {
         DocsFormalLetterTask.TASK_FAMILY_FOLDER: DocsFormalLetterTask,
         DocsInfluentialPapersTask.TASK_FAMILY_FOLDER: DocsInfluentialPapersTask,
+        DocsPersonalRecipeOcrTask.TASK_FAMILY_FOLDER: DocsPersonalRecipeOcrTask,
+        DocsEducationLessonPlanTask.TASK_FAMILY_FOLDER: DocsEducationLessonPlanTask,
+        DocsReferenceListTask.TASK_FAMILY_FOLDER: DocsReferenceListTask,
         SheetsMovieRecommendationTask.TASK_FAMILY_FOLDER: SheetsMovieRecommendationTask,
+        SheetsPaperSortingTask.TASK_FAMILY_FOLDER: SheetsPaperSortingTask,
         SheetsApartmentFinderTask.TASK_FAMILY_FOLDER: SheetsApartmentFinderTask,
         SheetsPersonalRecipeTask.TASK_FAMILY_FOLDER: SheetsPersonalRecipeTask,
+        SheetsPersonalTravelPlannerTask.TASK_FAMILY_FOLDER: SheetsPersonalTravelPlannerTask,
+        SheetsRunningAnalysisTask.TASK_FAMILY_FOLDER: SheetsRunningAnalysisTask,
+        SheetsSkiTourPlanTask.TASK_FAMILY_FOLDER: SheetsSkiTourPlanTask,
         SheetsStockTrackerTask.TASK_FAMILY_FOLDER: SheetsStockTrackerTask,
+        SheetsWeddingPlannerTask.TASK_FAMILY_FOLDER: SheetsWeddingPlannerTask,
+        SlidesBasicEducationalSlideDeckTask.TASK_FAMILY_FOLDER: SlidesBasicEducationalSlideDeckTask,
         SlidesBuyCarPresTask.TASK_FAMILY_FOLDER: SlidesBuyCarPresTask,
         SlidesEventAnnouncementPosterTask.TASK_FAMILY_FOLDER: SlidesEventAnnouncementPosterTask,
         SlidesIllustratedBookReportTask.TASK_FAMILY_FOLDER: SlidesIllustratedBookReportTask,
         SlidesPersonalLookbookPaintColorsTask.TASK_FAMILY_FOLDER: SlidesPersonalLookbookPaintColorsTask,
+        SlidesProductComparisonTask.TASK_FAMILY_FOLDER: SlidesProductComparisonTask,
         SlidesRemoveImagesAddPlaceholdersTask.TASK_FAMILY_FOLDER: SlidesRemoveImagesAddPlaceholdersTask,
     }
     prefix_to_task = {
         "docs_1_formal_letter": DocsFormalLetterTask,
         "docs_5_influential_papers": DocsInfluentialPapersTask,
+        "docs_11_personal_recipe_ocr": DocsPersonalRecipeOcrTask,
+        "docs_31_education_lesson_plan": DocsEducationLessonPlanTask,
+        "docs_37_reference_list": DocsReferenceListTask,
         "sheets_55_movie_recommendation": SheetsMovieRecommendationTask,
+        "sheets_10_paper_sorting": SheetsPaperSortingTask,
         "sheets_2_personal_recipe": SheetsPersonalRecipeTask,
+        "sheets_28_personal_travel_planner": SheetsPersonalTravelPlannerTask,
+        "sheets_7_running_analysis": SheetsRunningAnalysisTask,
+        "sheets_25_skitourplan": SheetsSkiTourPlanTask,
         "sheets_6_stock_tracker": SheetsStockTrackerTask,
         "sheets_38_apartment_finder": SheetsApartmentFinderTask,
+        "sheets_45_wedding_planner": SheetsWeddingPlannerTask,
+        "sheets_45_Personal_WeddingPlanner_weddingcolorpallette": SheetsWeddingPlannerTask,
+        "slides_26_basic_educational_slide_deck": SlidesBasicEducationalSlideDeckTask,
         "slides_20_illustrated_book_report": SlidesIllustratedBookReportTask,
         "slides_17_remove_images_add_placeholders": SlidesRemoveImagesAddPlaceholdersTask,
         "slides_29_buy_car_pres": SlidesBuyCarPresTask,
         "slides_39_personal_lookbook_paintcolors": SlidesPersonalLookbookPaintColorsTask,
         "slides_51_event_announcement_poster": SlidesEventAnnouncementPosterTask,
         "slides_30_wikipedia_photos": SlidesWikipediaPhotosTask,
+        "slides_42_product_comparison": SlidesProductComparisonTask,
+        "slides_42_personal_none_product_comparison": SlidesProductComparisonTask,
     }
 
     data = _load_task_info(exp_dir)
@@ -266,6 +347,24 @@ def _clear_stale_error_fields(data: Dict[str, Any]) -> None:
     """Remove failure markers from older grading attempts after a good regrade."""
     for key in ("evaluation_error", "evaluation_skipped", "evaluation_skip_reason"):
         data.pop(key, None)
+
+
+def _format_detailed_report_lines(result: Any) -> List[str]:
+    """Per-checkpoint / per-step lines (mirrors scripts/run_evaluator.py)."""
+    lines: List[str] = ["\n=== DETAILED REPORT ===\n"]
+    detailed = result.get_detailed_report()
+    score = detailed.get("final_score") or result.final_score
+    lines.append(f"FINAL SCORE:  {score['result']} / {score['total']}\n")
+    for cp in detailed["checkpoints"]:
+        lines.append(f"\nCheckpoint '{cp['name']}':  {cp['score']}\n")
+        for step in cp["steps"]:
+            status = "PASS" if step["success"] else "FAIL"
+            details = step.get("details") or "No details"
+            timing = ""
+            if step.get("execution_time"):
+                timing = f"  ({step['execution_time']:.1f}s)"
+            lines.append(f"  [{status}] {step['name']}: {details}{timing}\n")
+    return lines
 
 
 def regrade(exp_dir: Path) -> Dict[str, Any]:
@@ -299,15 +398,18 @@ def regrade(exp_dir: Path) -> Dict[str, Any]:
     # Old trials were run before doc_setup auto-shared each created doc with
     # the evaluator's service account. The evaluator authenticates as that
     # service account, so without explicit sharing it can't see (and 403s on)
-    # docs sitting inside the user's personal Drive. Try a best-effort
-    # two-tier share here (Drive API first, then Playwright UI fallback that
-    # auto-refreshes storage_state.json when its cookies are stale) so
-    # re-grading those trials succeeds even when the original owner's
+    # docs sitting inside the user's personal Drive. Run the two-tier share
+    # here (Drive API first, then Playwright UI fallback that auto-refreshes
+    # storage_state.json when its cookies are stale -- and auto-prompts a
+    # headed `google_auto_login.py` when the headless re-mint also fails)
+    # so re-grading those trials succeeds even when the original owner's
     # session has aged past Google's rotation window.
     #
     # Set ``KNOWS_SKIP_REGRADE_SHARE=1`` to skip the share entirely (useful
-    # when you know the SA already has access) and
-    # ``KNOWS_DISABLE_UI_SHARE_FALLBACK=1`` to skip just the Playwright tier.
+    # when you know the SA already has access),
+    # ``KNOWS_DISABLE_UI_SHARE_FALLBACK=1`` to skip just the Playwright tier,
+    # and ``KNOWS_DISABLE_AUTO_PROMPT_LOGIN=1`` to skip the headed-login
+    # auto-prompt while keeping the rest of the fallback chain.
     if os.environ.get("KNOWS_SKIP_REGRADE_SHARE", "").strip().lower() in {
         "1", "true", "yes", "on"
     }:
@@ -333,6 +435,14 @@ def regrade(exp_dir: Path) -> Dict[str, Any]:
                     kind = kind_from_split_or_family(family)
             if kind is None:
                 kind = kind_from_split_or_family(exp_dir.name)
+            if kind is None:
+                # ``exp_dir`` is often timestamp-prefixed (``2026-05-14_...``), so
+                # ``kind_from_split_or_family(exp_dir.name)`` is ``None``. The
+                # resolved task class always declares the editor URL shape for
+                # the Playwright share dialog.
+                wk = getattr(task_cls, "WORKSPACE_KIND", None)
+                if isinstance(wk, str) and wk.strip():
+                    kind = wk.strip()
 
             if share_doc_with_fallback(doc_id, kind=kind):
                 print(
@@ -352,8 +462,10 @@ def regrade(exp_dir: Path) -> Dict[str, Any]:
 
     print("Running evaluator.grade_checkpoints(...)")
     grade_fn = evaluator.grade_checkpoints
-    accepted = task._accepted_kwargs(grade_fn)
     browsing_history = _find_browsing_history(exp_dir)
+
+    # Mirror the live grading kwargs in KnowsWorkspaceTask._grade_doc.
+    accepted = task._accepted_kwargs(grade_fn)
     call_kwargs: Dict[str, Any] = {}
     if "workspace_doc_id" in accepted:
         call_kwargs["workspace_doc_id"] = doc_id
@@ -361,18 +473,36 @@ def regrade(exp_dir: Path) -> Dict[str, Any]:
         call_kwargs["browsing_history"] = browsing_history
     if "browsing_history_list" in accepted:
         call_kwargs["browsing_history_list"] = browsing_history
-    if "cached_models" in accepted and "cached_models" not in call_kwargs:
+    if "cached_models" in accepted:
         call_kwargs["cached_models"] = None
-    result = grade_fn(**call_kwargs)
 
     info: Dict[str, Any] = {
         "doc_id": doc_id,
         "instance_id": instance_id,
     }
+
+    log_path = exp_dir / "eval.log"
+    header = (
+        f"\n===== eval @ {datetime.now(timezone.utc).isoformat()} "
+        f"regrade {task.TASK_FAMILY_FOLDER} instance={instance_id} "
+        f"doc_id={doc_id} =====\n"
+    )
+    with open(log_path, "a", encoding="utf-8") as log_fp:
+        log_fp.write(header)
+        log_fp.flush()
+        with contextlib.redirect_stdout(log_fp), contextlib.redirect_stderr(log_fp):
+            result = grade_fn(**call_kwargs)
     reward, score_breakdown = task._summarize_result(result, info)
     info.update(score_breakdown)
     info["regrade.reward"] = reward
     info["regrade.source"] = "regrade_trial.py"
+    info["cum_reward_override"] = reward
+    with open(log_path, "a", encoding="utf-8") as log_fp:
+        log_fp.writelines(_format_detailed_report_lines(result))
+        log_fp.write(
+            f"\nFinal reward={reward:.4f} "
+            f"({info.get('eval.score_result')}/{info.get('eval.score_total')})\n"
+        )
 
     task_info_path = exp_dir / "task_info.json"
     if task_info_path.exists():
@@ -445,12 +575,26 @@ def main() -> int:
             "storage_state.json is stale and you'd rather just record a 0."
         ),
     )
+    parser.add_argument(
+        "--no-auto-prompt",
+        action="store_true",
+        help=(
+            "Skip the interactive Y/n prompt that auto-launches "
+            "`google_auto_login.py --headed` when the headless mint of "
+            "storage_state.json fails (sets KNOWS_DISABLE_AUTO_PROMPT_LOGIN=1). "
+            "By default the prompt runs whenever the script is attached to "
+            "a TTY so first-run device trust / 2SV challenges can be "
+            "completed without re-running the harness manually."
+        ),
+    )
     args = parser.parse_args()
 
     if args.no_share:
         os.environ["KNOWS_SKIP_REGRADE_SHARE"] = "1"
     if args.no_ui_share_fallback:
         os.environ["KNOWS_DISABLE_UI_SHARE_FALLBACK"] = "1"
+    if args.no_auto_prompt:
+        os.environ["KNOWS_DISABLE_AUTO_PROMPT_LOGIN"] = "1"
 
     try:
         regrade(args.exp_dir.resolve())
