@@ -36,6 +36,10 @@ cd AgentLab-Knows && pip install -e . && cd ..
 #    editable in-repo packages win (otherwise the "knows" action subset won't resolve)
 pip uninstall -y browsergym browsergym-core browsergym-experiments browsergym-webarena
 make install
+
+# 6. Add credentials and validate the whole environment (see next section)
+cp .env.example .env    # fill in GOOGLE_USER_EMAIL / GOOGLE_USER_PASSWORD + model API keys
+./setup.sh --headed
 ```
 
 > If you can't use submodules, clone the two repos manually instead of step 1's
@@ -45,20 +49,90 @@ make install
 > git clone https://github.com/farhanishmam/AgentLab-Knows AgentLab-Knows
 > ```
 
-## Authentication
+## Credentials & the setup script
 
-The benchmark logs into a real Google account. Set credentials in a gitignored
-`.env`, then let each run mint its own browser session:
+The benchmark logs into a real Google account with the credentials you put in
+a gitignored `.env` at the repo root — every run mints its own browser session
+from them. Start from the checked-in template:
 
 ```bash
-GOOGLE_USER_EMAIL=you@example.com
-GOOGLE_USER_PASSWORD=...
+cp .env.example .env
 ```
 
-A first run from a new machine/IP may hit a "Verify it's you" challenge — clear
-it once with `python scripts/google_auto_login.py --headed --output storage_state.json`.
-Grading uses a separate service-account credential at `auth-data/service-account.json`.
-See [SETUP_AUTH.md](SETUP_AUTH.md) for full details.
+| `.env` key | Required | Purpose |
+| --- | --- | --- |
+| `GOOGLE_USER_EMAIL` / `GOOGLE_USER_PASSWORD` | **Yes** | Google account the agent signs in with. Must not have 2FA/passkeys enforced. |
+| `OPENAI_API_KEY` | Only for `gpt55_*` scripts | Model API key. |
+| `ANTHROPIC_API_KEY` | Only for `opus47_*` scripts | Model API key. |
+| `DEEPSEEK_API_KEY` | Only for `deepseek_v4_*` scripts | Model API key. |
+| `GEMINI_API_KEY` | Only for `gemini31_*` scripts | Model API key. |
+| `SERVICE_ACCOUNT_PATH` | No | Override for the evaluator credential (defaults to `browsergym/knows/auth-data/service-account.json`). |
+
+Then validate everything in one shot:
+
+```bash
+./setup.sh --headed         # FIRST run on a new machine/IP — opens a visible
+                            # browser so you can clear Google's "Verify it's you"
+./setup.sh                  # every run after that: fully headless
+```
+
+The script checks, in order:
+
+1. **interpreter** — you're on the `knows` conda env (warn only);
+2. **.env** — exists (auto-created from `.env.example` if missing — fill it in and re-run);
+3. **credentials** — Google email/password are filled in; missing model API
+   keys are warnings that name the benchmark scripts they block;
+4. **playwright** — the chromium browser is installed;
+5. **auth mint** — performs a *real* headless Google login via
+   `scripts/google_auto_login.py` and writes `storage_state.json`;
+6. **service account** — the evaluator credential parses and the Drive API
+   accepts it (this credential is for *grading*, unrelated to the browser login);
+7. **drive links** — every Google Drive link embedded in the task goals is
+   publicly accessible (see next section).
+
+Each step prints `[setup] PASS/WARN/FAIL` and the script exits non-zero if
+anything FAILs. Re-running is always safe: nothing is destroyed and an
+existing `.env` is never overwritten. Skip individual steps with
+`--skip-mint`, `--skip-link-check`, `--skip-service-account`.
+
+**If the auth mint fails:** check the console output and the screenshots under
+`.bg_storage_state_pool/debug/`, then re-run `./setup.sh --headed` — the usual
+cause is Google's one-time "Verify it's you" challenge on a new machine or IP.
+Device trust persists after you clear it once. Full details in
+[SETUP_AUTH.md](SETUP_AUTH.md).
+
+## Drive links in tasks
+
+Some task goals reference shared Google Drive files/folders (source data,
+template presentations, images). The benchmark account has no special grants
+on those, so each one must be shared as **"Anyone with the link"**.
+
+Two layers enforce this:
+
+- **Pre-task check (automatic).** Before a task starts — and after any
+  per-family `setup_run.py` preparation script has run — the task probes every
+  Drive link in its goal unauthenticated. A private/missing link fails the
+  episode immediately with the offending URL, *before* any workspace doc is
+  created. Bypass with `KNOWS_SKIP_LINK_CHECK=1` if you must.
+- **Standalone sweep (on demand).** Audit link health across all tasks without
+  running anything:
+
+  ```bash
+  python scripts/check_drive_links.py                 # sweep every task family
+  python scripts/check_drive_links.py --split docs_1  # one family
+  python scripts/check_drive_links.py --url <drive-url>   # one link
+  python scripts/check_drive_links.py --api           # add service-account permission check
+  python scripts/check_drive_links.py --json          # machine-readable output
+  ```
+
+  Exit code is non-zero when any link is PRIVATE / MISSING / ERROR. To fix a
+  flagged link: open it in an incognito window — if it asks you to sign in,
+  share the file as "Anyone with the link" from the owning account.
+
+Task families that ship a `setup_run.py` (e.g. `sheets_10_paper_sorting`,
+which creates fresh per-run destination folders and rewrites its task goal)
+have it run automatically before each episode; any family can opt in by adding
+a `setup_run.py` next to its `instance_<n>/` folders.
 
 ## Run
 

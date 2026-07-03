@@ -6,14 +6,23 @@ to the legacy persistent-profile workflow if you need it.
 
 ## TL;DR
 
-1. Put the Google account credentials into `.env`:
+1. Put the Google account credentials into `.env` (copy
+   [`.env.example`](.env.example) as a starting point):
 
    ```bash
    export GOOGLE_USER_EMAIL="agentbenchmark@gmail.com"
    export GOOGLE_USER_PASSWORD="Universityofutah"
    ```
 
-2. Run the benchmark normally:
+2. Validate the environment end-to-end (credentials, headless mint,
+   evaluator service account, task Drive links):
+
+   ```bash
+   ./setup.sh --headed   # first run on a new machine/IP
+   ./setup.sh            # afterwards
+   ```
+
+3. Run the benchmark normally:
 
    ```bash
    ./run.sh

@@ -49,6 +49,13 @@ make install                         # editable-installs every browsergym/* sub-
 ```
 Submodules: `git submodule update --init --recursive` (pulls `AgentLab-Knows` and `browsergym/knows`).
 
+### Validate the environment
+```bash
+./setup.sh                    # .env creds, headless login mint, service account, Drive-link sweep
+./setup.sh --headed           # first run on a new machine/IP ("Verify it's you")
+python scripts/check_drive_links.py [--split docs_1 | --url <drive-url>]   # link sweep alone
+```
+
 ### Run benchmarks
 ```bash
 ./run_one.sh <script> <benchmark> [n_jobs]     # one combo, fully bootstrapped
@@ -92,6 +99,7 @@ pytest -m "not slow"                            # markers: slow, serial (see pyp
 | `KNOWS_TASKS` | Comma/space list of specific task ids to subset (e.g. `knows.sheets_2_personal_recipe.5`). |
 | `KNOWS_RUN_EVALUATORS` | Run inline grading at DONE. Default **on** via `_common.py`; `benchmark.py` leaves it **off** unless set. |
 | `KNOWS_EXISTING_DOC_IDS` | JSON or `task=doc_id` pairs to continue against an existing workspace doc instead of creating fresh. |
+| `KNOWS_SKIP_LINK_CHECK` | Bypass the pre-task Drive-link public-accessibility check (`task.py` fails the episode when a goal-embedded link isn't shared as "Anyone with the link"). Sweep manually with `scripts/check_drive_links.py`. |
 | `AGENTLAB_EXP_ROOT` | Override the results output directory (skips auto-routing). |
 | `BROWSERGYM_EXTRA_GOAL_INSTRUCTIONS` | Appended to every goal — sign-in recovery text + the **Apps Script ban** (agents may not use Apps Script / `script.google.com` to complete tasks). Set in `_run_common.sh`. |
 
