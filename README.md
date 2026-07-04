@@ -2,158 +2,121 @@
 
 A fork of [BrowserGym](https://github.com/ServiceNow/BrowserGym) wired to run the
 **Knows** benchmark: Google Workspace (Docs / Sheets / Slides) tasks for
-evaluating LLM browser agents. An agent drives a real Chromium browser via
-Playwright to complete a task against a freshly-created Workspace doc, then an
-evaluator grades the result using the Google Workspace APIs.
+evaluating LLM browser agents. An agent drives a real Chromium browser to
+complete a task against a fresh Workspace doc, then an evaluator grades the
+result via the Google Workspace APIs.
 
-This repo depends on two companion repos, cloned as submodules:
+It pulls in two companion repos as submodules:
 
 | Repo | Path | Purpose |
 | --- | --- | --- |
-| [alexgill321/Agent-Benchmark](https://github.com/alexgill321/Agent-Benchmark) | `browsergym/knows` | **The Knows benchmark** — task definitions, evaluators, and gold data. Required to *run the benchmark*. |
-| [farhanishmam/AgentLab-Knows](https://github.com/farhanishmam/AgentLab-Knows) | `AgentLab-Knows` | The `GenericAgent` and `AGENT_*` model configs. Required to *run an agent*. |
+| [alexgill321/Agent-Benchmark](https://github.com/alexgill321/Agent-Benchmark) | `browsergym/knows` | The Knows benchmark — tasks, evaluators, gold data. |
+| [farhanishmam/AgentLab-Knows](https://github.com/farhanishmam/AgentLab-Knows) | `AgentLab-Knows` | The `GenericAgent` and `AGENT_*` model configs. |
+
+## Prerequisites
+
+- **Python 3.10** (conda recommended).
+- **A Google account** for the agent to sign in as — no 2FA/passkeys enforced.
+  Use a throwaway account, not a personal one.
+- **A Google Cloud service account** for grading (see [below](#evaluator-service-account-for-grading)).
+- **An API key** for each model you run (OpenAI / Anthropic / Gemini / DeepSeek).
 
 ## Setup
 
 ```bash
-# 1. Clone this repo with its two submodules
+# Clone with submodules
 git clone <this-repo-url> BrowserGym-Knows
 cd BrowserGym-Knows
-git submodule update --init --recursive          # pulls browsergym/knows + AgentLab-Knows
+git submodule update --init --recursive
 
-# 2. Create the environment
-conda create -n knows python=3.10
-conda activate knows
+# Environment
+conda create -n knows python=3.10 && conda activate knows
 
-# 3. Install dependencies + the in-repo browsergym sub-packages (editable) + playwright
+# Install deps + in-repo browsergym packages (editable) + the agent runner
 pip install -r requirements.txt
 make install
-
-# 4. Install the agent runner
 cd AgentLab-Knows && pip install -e . && cd ..
 
-# 5. IMPORTANT: AgentLab pulls in its own browsergym wheels — uninstall those so the
-#    editable in-repo packages win (otherwise the "knows" action subset won't resolve)
+# AgentLab pulls its own browsergym wheels — drop them so the editable ones win
+# (otherwise the "knows" action subset won't resolve)
 pip uninstall -y browsergym browsergym-core browsergym-experiments browsergym-webarena
 make install
 
-# 6. Add credentials and validate the whole environment (see next section)
-cp .env.example .env    # fill in GOOGLE_USER_EMAIL / GOOGLE_USER_PASSWORD + model API keys
-./setup.sh --headed
+# Credentials + validate everything
+cp .env.example .env      # fill in Google login + model API keys
+./setup.sh --headed       # first run on a new machine; ./setup.sh afterwards
 ```
 
-> If you can't use submodules, clone the two repos manually instead of step 1's
-> `submodule update`:
+> No submodule access? Clone the two repos manually:
 > ```bash
 > git clone git@github.com:alexgill321/Agent-Benchmark.git browsergym/knows
 > git clone https://github.com/farhanishmam/AgentLab-Knows AgentLab-Knows
 > ```
 
-## Credentials & the setup script
+## Credentials
 
-The benchmark logs into a real Google account with the credentials you put in
-a gitignored `.env` at the repo root — every run mints its own browser session
-from them. Start from the checked-in template:
+Fill in the gitignored `.env` (copied from `.env.example`):
 
-```bash
-cp .env.example .env
-```
-
-| `.env` key | Required | Purpose |
+| Key | Required | Purpose |
 | --- | --- | --- |
-| `GOOGLE_USER_EMAIL` / `GOOGLE_USER_PASSWORD` | **Yes** | Google account the agent signs in with. Must not have 2FA/passkeys enforced. |
-| `OPENAI_API_KEY` | Only for `gpt55_*` scripts | Model API key. |
-| `ANTHROPIC_API_KEY` | Only for `opus47_*` scripts | Model API key. |
-| `DEEPSEEK_API_KEY` | Only for `deepseek_v4_*` scripts | Model API key. |
-| `GEMINI_API_KEY` | Only for `gemini31_*` scripts | Model API key. |
-| `SERVICE_ACCOUNT_PATH` | No | Override for the evaluator credential (defaults to `browsergym/knows/auth-data/service-account.json`). |
+| `GOOGLE_USER_EMAIL` / `GOOGLE_USER_PASSWORD` | **Yes** | Account the agent signs in with (no 2FA). |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `DEEPSEEK_API_KEY` | Per model | Only the models you run. |
+| `SERVICE_ACCOUNT_PATH` | Optional | Override the grading key path (default `browsergym/knows/auth-data/service-account.json`). |
 
-Then validate everything in one shot:
-
-```bash
-./setup.sh --headed         # FIRST run on a new machine/IP — opens a visible
-                            # browser so you can clear Google's "Verify it's you"
-./setup.sh                  # every run after that: fully headless
-```
-
-The script checks, in order:
-
-1. **interpreter** — you're on the `knows` conda env (warn only);
-2. **.env** — exists (auto-created from `.env.example` if missing — fill it in and re-run);
-3. **credentials** — Google email/password are filled in; missing model API
-   keys are warnings that name the benchmark scripts they block;
-4. **playwright** — the chromium browser is installed;
-5. **auth mint** — performs a *real* headless Google login via
-   `scripts/google_auto_login.py` and writes `storage_state.json`;
-6. **service account** — the evaluator credential parses and the Drive API
-   accepts it (this credential is for *grading*, unrelated to the browser login);
-7. **drive links** — every Google Drive link embedded in the task goals is
-   publicly accessible (see next section).
-
-Each step prints `[setup] PASS/WARN/FAIL` and the script exits non-zero if
-anything FAILs. Re-running is always safe: nothing is destroyed and an
-existing `.env` is never overwritten. Skip individual steps with
-`--skip-mint`, `--skip-link-check`, `--skip-service-account`.
-
-**If the auth mint fails:** check the console output and the screenshots under
-`.bg_storage_state_pool/debug/`, then re-run `./setup.sh --headed` — the usual
-cause is Google's one-time "Verify it's you" challenge on a new machine or IP.
-Device trust persists after you clear it once. Full details in
+`./setup.sh` validates the environment end-to-end (login, service account, task
+Drive links) and prints `PASS/WARN/FAIL` per step. Run it `--headed` the first
+time so you can clear Google's one-time "Verify it's you" challenge; details in
 [SETUP_AUTH.md](SETUP_AUTH.md).
+
+## Evaluator service account (for grading)
+
+The evaluators read the agent's finished document through the Workspace APIs as
+a **Google Cloud service account** — separate from the browser login. Create one
+once in the [Cloud Console](https://console.cloud.google.com/):
+
+1. Create/pick a project.
+2. Enable the **Drive, Docs, Sheets, and Slides** APIs.
+3. IAM & Admin → *Service Accounts* → create one. **No roles needed** — the
+   runner auto-shares each finished doc with the account, so access is granted
+   per-document at grading time.
+4. Open it → *Keys* → *Add key* → *Create new key* → **JSON**.
+5. Save the key as `browsergym/knows/auth-data/service-account.json` (gitignored),
+   or point `SERVICE_ACCOUNT_PATH` at it.
+6. Confirm with `./setup.sh` — the service-account step prints `PASS`.
+
+> The JSON key is a live credential — never commit it. If exposed, delete it in
+> the Cloud Console and create a new one.
 
 ## Drive links in tasks
 
-Some task goals reference shared Google Drive files/folders (source data,
-template presentations, images). The benchmark account has no special grants
-on those, so each one must be shared as **"Anyone with the link"**.
+Some goals reference shared Drive files that must be shared as **"Anyone with
+the link"**. The task checks this automatically before each run (bypass with
+`KNOWS_SKIP_LINK_CHECK=1`). Audit all links on demand:
 
-Two layers enforce this:
+```bash
+python scripts/check_drive_links.py [--split docs_1 | --url <drive-url>]
+```
 
-- **Pre-task check (automatic).** Before a task starts — and after any
-  per-family `setup_run.py` preparation script has run — the task probes every
-  Drive link in its goal unauthenticated. A private/missing link fails the
-  episode immediately with the offending URL, *before* any workspace doc is
-  created. Bypass with `KNOWS_SKIP_LINK_CHECK=1` if you must.
-- **Standalone sweep (on demand).** Audit link health across all tasks without
-  running anything:
-
-  ```bash
-  python scripts/check_drive_links.py                 # sweep every task family
-  python scripts/check_drive_links.py --split docs_1  # one family
-  python scripts/check_drive_links.py --url <drive-url>   # one link
-  python scripts/check_drive_links.py --api           # add service-account permission check
-  python scripts/check_drive_links.py --json          # machine-readable output
-  ```
-
-  Exit code is non-zero when any link is PRIVATE / MISSING / ERROR. To fix a
-  flagged link: open it in an incognito window — if it asks you to sign in,
-  share the file as "Anyone with the link" from the owning account.
-
-Task families that ship a `setup_run.py` (e.g. `sheets_10_paper_sorting`,
-which creates fresh per-run destination folders and rewrites its task goal)
-have it run automatically before each episode; any family can opt in by adding
-a `setup_run.py` next to its `instance_<n>/` folders.
+To fix a flagged link, open it in an incognito window; if it asks you to sign
+in, reshare it as "Anyone with the link".
 
 ## Run
 
 ```bash
-./run_one.sh <script> <benchmark> [n_jobs]
-./run_one.sh opus47_axt.py knows_docs_1
-./run_one.sh gpt55_axt.py  knows_slides_39
+./run_one.sh <script> <benchmark>       # e.g. ./run_one.sh opus47_axt.py knows_docs_1
 ```
 
-- `<script>` is one of [benchmarks/](benchmarks/) — named `<model>_<obs-mode>.py`
-  (e.g. `opus47_axt.py`, `gpt55_axt_screenshot.py`); it selects the model and
-  observation mode (accessibility tree / screenshot / both).
-- `<benchmark>` is a split named `knows_<family>_<num>` (e.g. `knows_docs_1`,
-  `knows_sheets_38`, `knows_slides_42`). Each split = 5 task instances.
+- `<script>` — one of [benchmarks/](benchmarks/), named `<model>_<obs-mode>.py`
+  (accessibility tree / screenshot / both).
+- `<benchmark>` — a split `knows_<family>_<num>` (`knows_docs_1`, `knows_sheets_38`,
+  `knows_slides_42`); each is 5 instances.
 
-Results route to `<obs>/<model>/<split>/`. Run a full sweep with `./run.sh`.
-
-To run an evaluator standalone:
+Results route to `<obs>/<model>/<split>/`. Full sweep: `./run.sh`. Run an
+evaluator standalone:
 
 ```bash
 python scripts/run_evaluator.py --split docs_1 --instance 1 --id <google_file_id>
 ```
 
-See [CLAUDE.md](CLAUDE.md) for repo internals (run wiring, env vars, output routing).
+See [CLAUDE.md](CLAUDE.md) for repo internals.
+</content>
