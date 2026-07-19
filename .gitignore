@@ -547,3 +547,5 @@ storage_state.json
 service-account.json
 sheets_7_atlas_eval_results.json
 storage_state.json
+comet_results/
+scores_axt/
